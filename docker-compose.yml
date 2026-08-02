@@ -5,5 +5,9 @@ services:
        - '8080:8080'
     volumes:      
        - '/path/to/data:/app/data'
+    environment:
+       - 'OCTOPUS_BILLING_BASE_URL=${OCTOPUS_BILLING_BASE_URL:-}'
+       - 'OCTOPUS_BILLING_SERVICE_TOKEN=${OCTOPUS_BILLING_SERVICE_TOKEN:-}'
+       - 'OCTOPUS_BILLING_TIMEOUT_SECONDS=${OCTOPUS_BILLING_TIMEOUT_SECONDS:-10}'
     container_name: octopus
     restart: unless-stopped

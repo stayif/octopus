@@ -168,12 +168,22 @@ All configuration options can be overridden via environment variables using the 
 | `OCTOPUS_DATABASE_TYPE` | `database.type` |
 | `OCTOPUS_DATABASE_PATH` | `database.path` |
 | `OCTOPUS_LOG_LEVEL` | `log.level` |
+| `OCTOPUS_BILLING_BASE_URL` | Honey account billing service base URL (required for billing-bound API keys) |
+| `OCTOPUS_BILLING_SERVICE_TOKEN` | Shared service credential for Honey balance reservation and settlement |
+| `OCTOPUS_BILLING_TIMEOUT_SECONDS` | Billing request timeout in seconds (default `10`, allowed `1-60`) |
 | `OCTOPUS_GITHUB_PAT` | For rate limiting when getting the latest version (optional) |
 | `OCTOPUS_RELAY_MAX_SSE_EVENT_SIZE` | Maximum SSE event size (optional) |
 | `OCTOPUS_IMAGES_BODY_MEMORY_THRESHOLD_MB` | Images request body in-memory threshold. If exceeded, it will be spooled to a temporary file (optional, default 16) |
 | `OCTOPUS_IMAGES_BODY_MAX_MB` | Images request body maximum size. Requests above this limit are rejected (optional, default 256) |
 | `OCTOPUS_IMAGES_BODY_TMP_DIR` | Images request body temporary directory (optional, default `./cache`) |
 | `OCTOPUS_IMAGES_BODY_TMP_CLEANUP_HOURS` | Startup cleanup threshold for temporary files (optional, default 24) |
+
+Billing-bound API keys use `billing_enabled`, `owner_account_id`, and
+`owner_role_id`, and must bind exactly one public model through
+`supported_models`. Configure that model's independent user price with
+`pricing_version` plus the four `*_microunits_per_million` fields. Provider
+cost fields (`input`, `output`, `cache_read`, and `cache_write`) remain
+operations-only and never determine the bound account charge.
 
 ## 📸 Screenshots
 

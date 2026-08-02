@@ -8,4 +8,7 @@ type APIKey struct {
 	ExpireAt        int64   `json:"expire_at,omitempty"`
 	MaxCost         float64 `json:"max_cost,omitempty"`
 	SupportedModels string  `json:"supported_models,omitempty"`
+	OwnerAccountID  string  `json:"owner_account_id,omitempty" gorm:"index"`
+	OwnerRoleID     string  `json:"owner_role_id,omitempty" gorm:"index"`
+	BillingEnabled  bool    `json:"billing_enabled,omitempty" gorm:"default:false"`
 }

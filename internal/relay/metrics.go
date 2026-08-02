@@ -6,6 +6,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/bestruirui/octopus/internal/billing"
 	"github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/op"
 	"github.com/bestruirui/octopus/internal/price"
@@ -27,8 +28,10 @@ type RelayMetrics struct {
 	InternalResponse []byte
 
 	// 统计指标
-	ActualModel string
-	Stats       model.StatsMetrics
+	ActualModel   string
+	Stats         model.StatsMetrics
+	BillingUsage  billing.Usage
+	UsageObserved bool
 
 	// 参数覆盖
 	ParamOverride string
@@ -42,6 +45,13 @@ func (m *RelayMetrics) RecordUsage(usage *llm.Usage) {
 	// usage 已由 axonhub/llm 标准化；octopus 仍使用本地模型价格表计算成本，所以这里只做用量落点和价格换算。
 	m.Stats.InputToken = usage.PromptTokens
 	m.Stats.OutputToken = usage.CompletionTokens
+	m.UsageObserved = usage.PromptTokens > 0 || usage.CompletionTokens > 0
+	m.BillingUsage.InputTokens = usage.PromptTokens
+	m.BillingUsage.OutputTokens = usage.CompletionTokens
+	if usage.PromptTokensDetails != nil {
+		m.BillingUsage.CacheReadTokens = usage.PromptTokensDetails.CachedTokens
+		m.BillingUsage.CacheWriteTokens = usage.PromptTokensDetails.WriteCachedTokens
+	}
 
 	modelPrice := price.GetLLMPrice(m.ActualModel)
 	if modelPrice == nil {

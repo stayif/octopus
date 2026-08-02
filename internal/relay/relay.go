@@ -11,12 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bestruirui/octopus/internal/billing"
 	"github.com/bestruirui/octopus/internal/helper"
 	dbmodel "github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/op"
 	"github.com/bestruirui/octopus/internal/relay/balancer"
 	"github.com/bestruirui/octopus/internal/server/resp"
 	"github.com/bestruirui/octopus/internal/utils/log"
+	"github.com/bestruirui/octopus/internal/utils/snowflake"
 	"github.com/gin-gonic/gin"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -66,7 +68,7 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 		return nil, err
 	}
 
-	return &relayRun{
+	run := &relayRun{
 		c:               c,
 		inAdapter:       inAdapter,
 		internalRequest: internalRequest,
@@ -79,7 +81,102 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 		},
 		iter:  iter,
 		group: group,
-	}, nil
+	}
+	if c.GetBool("billing_enabled") {
+		if err := run.reserveBilling(); err != nil {
+			return nil, err
+		}
+	}
+	return run, nil
+}
+
+func (r *relayRun) reserveBilling() error {
+	client := billing.DefaultClient()
+	if client == nil {
+		err := errors.New("billing service is unavailable")
+		resp.Error(r.c, http.StatusServiceUnavailable, err.Error())
+		return err
+	}
+	info, err := op.LLMInfoGet(r.metrics.RequestModel)
+	if err != nil {
+		resp.Error(r.c, http.StatusServiceUnavailable, "public model billing price is unavailable")
+		return err
+	}
+	price := billing.Price{
+		Model:                          r.metrics.RequestModel,
+		Version:                        info.PricingVersion,
+		InputMicrounitsPerMillion:      info.InputMicrounitsPerMillion,
+		OutputMicrounitsPerMillion:     info.OutputMicrounitsPerMillion,
+		CacheReadMicrounitsPerMillion:  info.CacheReadMicrounitsPerMillion,
+		CacheWriteMicrounitsPerMillion: info.CacheWriteMicrounitsPerMillion,
+	}
+	var maxOutputTokens int64
+	if r.internalRequest.MaxCompletionTokens != nil {
+		maxOutputTokens = *r.internalRequest.MaxCompletionTokens
+	} else if r.internalRequest.MaxTokens != nil {
+		maxOutputTokens = *r.internalRequest.MaxTokens
+	}
+	requestBytes := 0
+	if r.internalRequest.RawRequest != nil {
+		requestBytes = len(r.internalRequest.RawRequest.Body)
+	}
+	maxCharge, err := billing.MaximumCharge(price, requestBytes, maxOutputTokens)
+	if err != nil {
+		resp.Error(r.c, http.StatusBadRequest, "request cannot be bounded for billing")
+		return err
+	}
+	requestID := fmt.Sprintf("oct-%d", snowflake.GenerateID())
+	reservation, err := client.Reserve(r.c.Request.Context(), billing.ReserveRequest{
+		AccountID:           r.c.GetString("billing_account_id"),
+		APIKeyID:            r.metrics.APIKeyID,
+		RequestID:           requestID,
+		MaxChargeMicrounits: maxCharge,
+	})
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if strings.Contains(err.Error(), "HTTP 402") {
+			status = http.StatusPaymentRequired
+		}
+		resp.Error(r.c, status, "billing reservation rejected")
+		return err
+	}
+	if reservation.Status != "RESERVED" || reservation.ReservedMicrounits < maxCharge {
+		err := errors.New("billing reservation is invalid")
+		resp.Error(r.c, http.StatusServiceUnavailable, err.Error())
+		return err
+	}
+	r.billing = &billingState{client: client, price: price, reservation: reservation}
+	return nil
+}
+
+func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.ChannelAttempt, success bool) error {
+	if r.billing == nil {
+		return nil
+	}
+	detached := context.WithoutCancel(ctx)
+	if !r.metrics.UsageObserved {
+		_, cancelErr := r.billing.client.Cancel(detached, r.billing.reservation.ReservationID)
+		if success {
+			return errors.Join(errors.New("successful provider response is missing verifiable usage"), cancelErr)
+		}
+		return cancelErr
+	}
+	charge, err := billing.CalculateCharge(r.billing.price, r.metrics.BillingUsage)
+	if err != nil {
+		return err
+	}
+	channelID, _ := finalChannel(attempts)
+	providerRef := fmt.Sprintf("channel-%d", channelID)
+	_, err = r.billing.client.Settle(detached, billing.SettlementRequest{
+		ReservationID:    r.billing.reservation.ReservationID,
+		ReceiptID:        "receipt-" + strings.TrimPrefix(r.billing.reservation.ReservationID, "res-"),
+		ExternalModel:    r.billing.price.Model,
+		PricingVersion:   r.billing.price.Version,
+		Usage:            r.metrics.BillingUsage,
+		ChargeMicrounits: charge,
+		ProviderRef:      providerRef,
+	})
+	return err
 }
 
 func (r *relayRun) run() {
@@ -90,7 +187,8 @@ func (r *relayRun) run() {
 		select {
 		case <-ctx.Done():
 			log.Infof("request context canceled, stopping retry")
-			r.metrics.Save(ctx, false, context.Canceled, r.iter.Attempts())
+			billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), false)
+			r.metrics.Save(ctx, false, errors.Join(context.Canceled, billingErr), r.iter.Attempts())
 			return
 		default:
 		}
@@ -106,11 +204,19 @@ func (r *relayRun) run() {
 
 		written, err := attempt.run()
 		if err == nil {
+			if billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), true); billingErr != nil {
+				r.metrics.Save(ctx, false, billingErr, r.iter.Attempts())
+				if !r.c.Writer.Written() {
+					resp.Error(r.c, http.StatusBadGateway, "billing settlement failed")
+				}
+				return
+			}
 			r.metrics.Save(ctx, true, nil, r.iter.Attempts())
 			return
 		}
 		if written {
-			r.metrics.Save(ctx, false, err, r.iter.Attempts())
+			billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), false)
+			r.metrics.Save(ctx, false, errors.Join(err, billingErr), r.iter.Attempts())
 			return
 		}
 		lastErr = err
@@ -119,6 +225,8 @@ func (r *relayRun) run() {
 	if lastErr == nil {
 		lastErr = errors.New("all channels failed")
 	}
+	billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), false)
+	lastErr = errors.Join(lastErr, billingErr)
 	r.metrics.Save(ctx, false, lastErr, r.iter.Attempts())
 	resp.Error(r.c, http.StatusBadGateway, lastErr.Error())
 }

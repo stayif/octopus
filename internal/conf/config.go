@@ -23,10 +23,17 @@ type Database struct {
 	Path string `mapstructure:"path"`
 }
 
+type Billing struct {
+	BaseURL        string `mapstructure:"base_url"`
+	ServiceToken   string `mapstructure:"service_token"`
+	TimeoutSeconds int    `mapstructure:"timeout_seconds"`
+}
+
 type Config struct {
 	Server   Server   `mapstructure:"server"`
 	Log      Log      `mapstructure:"log"`
 	Database Database `mapstructure:"database"`
+	Billing  Billing  `mapstructure:"billing"`
 }
 
 var AppConfig Config
@@ -74,4 +81,7 @@ func setDefaults() {
 	viper.SetDefault("database.type", "sqlite")
 	viper.SetDefault("database.path", "data/data.db")
 	viper.SetDefault("log.level", "info")
+	viper.SetDefault("billing.base_url", "")
+	viper.SetDefault("billing.service_token", "")
+	viper.SetDefault("billing.timeout_seconds", 10)
 }

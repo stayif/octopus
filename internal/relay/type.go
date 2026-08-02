@@ -1,12 +1,19 @@
 package relay
 
 import (
+	"github.com/bestruirui/octopus/internal/billing"
 	dbmodel "github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/relay/balancer"
 	"github.com/gin-gonic/gin"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/transformer"
 )
+
+type billingState struct {
+	client      billing.Client
+	price       billing.Price
+	reservation billing.Reservation
+}
 
 // relayRun 保存一次客户端请求在负载均衡循环中共享的状态。
 type relayRun struct {
@@ -16,6 +23,7 @@ type relayRun struct {
 	metrics         *RelayMetrics
 	iter            *balancer.Iterator
 	group           dbmodel.Group
+	billing         *billingState
 }
 
 // relayAttempt 保存一次上游通道尝试的状态。
