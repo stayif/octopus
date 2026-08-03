@@ -69,11 +69,22 @@ func APIKeyAuth() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		statsAPIKey := op.StatsAPIKeyGet(apiKeyObj.ID)
-		if apiKeyObj.MaxCost > 0 && apiKeyObj.MaxCost < statsAPIKey.StatsMetrics.OutputCost+statsAPIKey.StatsMetrics.InputCost {
-			resp.Error(c, http.StatusUnauthorized, "API key has reached the max cost")
-			c.Abort()
-			return
+		if apiKeyObj.BillingEnabled {
+			if apiKeyObj.OwnerAccountID == "" || apiKeyObj.OwnerRoleID == "" {
+				resp.Error(c, http.StatusUnauthorized, "API key billing binding is invalid")
+				c.Abort()
+				return
+			}
+			c.Set("billing_enabled", true)
+			c.Set("billing_account_id", apiKeyObj.OwnerAccountID)
+			c.Set("billing_role_id", apiKeyObj.OwnerRoleID)
+		} else {
+			statsAPIKey := op.StatsAPIKeyGet(apiKeyObj.ID)
+			if apiKeyObj.MaxCost > 0 && apiKeyObj.MaxCost < statsAPIKey.StatsMetrics.OutputCost+statsAPIKey.StatsMetrics.InputCost {
+				resp.Error(c, http.StatusUnauthorized, "API key has reached the max cost")
+				c.Abort()
+				return
+			}
 		}
 		c.Set("request_type", requestType)
 		c.Set("supported_models", apiKeyObj.SupportedModels)

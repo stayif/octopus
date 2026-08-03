@@ -7,9 +7,18 @@ type LLMPrice struct {
 	CacheWrite float64 `json:"cache_write"`
 }
 
+type UserBillingPrice struct {
+	PricingVersion                 string `json:"pricing_version,omitempty"`
+	InputMicrounitsPerMillion      int64  `json:"input_microunits_per_million,omitempty"`
+	OutputMicrounitsPerMillion     int64  `json:"output_microunits_per_million,omitempty"`
+	CacheReadMicrounitsPerMillion  int64  `json:"cache_read_microunits_per_million,omitempty"`
+	CacheWriteMicrounitsPerMillion int64  `json:"cache_write_microunits_per_million,omitempty"`
+}
+
 type LLMInfo struct {
 	Name string `json:"name" gorm:"primaryKey;not null"`
 	LLMPrice
+	UserBillingPrice
 }
 
 type LLMChannel struct {

@@ -3,7 +3,10 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/bestruirui/octopus/internal/billing"
 	"github.com/bestruirui/octopus/internal/conf"
 	"github.com/bestruirui/octopus/internal/relay"
 	_ "github.com/bestruirui/octopus/internal/server/handlers"
@@ -19,6 +22,20 @@ import (
 var httpSrv http.Server
 
 func Start() error {
+	if strings.TrimSpace(conf.AppConfig.Billing.BaseURL) != "" || strings.TrimSpace(conf.AppConfig.Billing.ServiceToken) != "" {
+		if conf.AppConfig.Billing.TimeoutSeconds < 1 || conf.AppConfig.Billing.TimeoutSeconds > 60 {
+			return fmt.Errorf("billing timeout must be between 1 and 60 seconds")
+		}
+		client, err := billing.NewHTTPClient(
+			conf.AppConfig.Billing.BaseURL,
+			conf.AppConfig.Billing.ServiceToken,
+			&http.Client{Timeout: time.Duration(conf.AppConfig.Billing.TimeoutSeconds) * time.Second},
+		)
+		if err != nil {
+			return fmt.Errorf("billing configuration is invalid: %w", err)
+		}
+		billing.SetDefaultClient(client)
+	}
 	if conf.IsDebug() {
 		gin.SetMode(gin.DebugMode)
 	} else {
