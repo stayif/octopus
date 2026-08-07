@@ -2,8 +2,10 @@ package op
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bestruirui/octopus/internal/db"
 	"github.com/bestruirui/octopus/internal/model"
@@ -42,7 +44,10 @@ func TestValidateImageRelayLogAuditUsesStrictMetadataAllowlist(t *testing.T) {
 		{name: "provider model", mutate: func(log *model.RelayLog) { log.ActualModelName = "private-provider-model" }},
 		{name: "api key label", mutate: func(log *model.RelayLog) { log.RequestAPIKeyName = "private-key-label" }},
 		{name: "unsafe public model", mutate: func(log *model.RelayLog) { log.RequestModelName = "https://assets.invalid/private" }},
-		{name: "non-image route", mutate: func(log *model.RelayLog) { log.RouteType = string(llm.RequestTypeChat) }},
+		{name: "non-image route", mutate: func(log *model.RelayLog) {
+			log.RouteType = string(llm.RequestTypeChat)
+			log.RouteFormat = string(llm.APIFormatOpenAIChatCompletion)
+		}},
 	}
 
 	for _, tt := range tests {
@@ -53,6 +58,107 @@ func TestValidateImageRelayLogAuditUsesStrictMetadataAllowlist(t *testing.T) {
 				t.Fatalf("unsafe image relay log passed audit: %+v", candidate)
 			}
 		})
+	}
+}
+
+func TestStructuredImageRoutePredicateIsConsistentForPersistenceAndAudit(t *testing.T) {
+	if err := db.InitDB("sqlite", filepath.Join(t.TempDir(), "octopus.db"), false); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	if err := InitCache(); err != nil {
+		t.Fatalf("InitCache: %v", err)
+	}
+	t.Cleanup(func() {
+		relayLogCacheLock.Lock()
+		relayLogCache = relayLogCache[:0]
+		relayLogCacheLock.Unlock()
+		_ = db.Close()
+	})
+
+	base := model.RelayLog{
+		ID:                125,
+		Time:              time.Now().Unix(),
+		RequestModelName:  "honey-image-v1",
+		RequestAPIKeyName: "private-key-label",
+		ChannelName:       "private-provider",
+		RequestContent:    "synthetic-prompt-canary",
+		ResponseContent:   "https://assets.invalid/private",
+		Error:             "provider-payload-canary",
+		TotalAttempts:     1,
+		RequestID:         "oct-1250004",
+		GenerationCount:   1,
+		UseTime:           250,
+		ResultCode:        200,
+	}
+
+	accepted := []struct {
+		name        string
+		routeType   llm.RequestType
+		routeFormat llm.APIFormat
+	}{
+		{
+			name:        "image request type with empty format",
+			routeType:   llm.RequestTypeImage,
+			routeFormat: "",
+		},
+		{
+			name:        "chat request type with image format",
+			routeType:   llm.RequestTypeChat,
+			routeFormat: llm.APIFormatOpenAIImageGeneration,
+		},
+	}
+
+	for index, tt := range accepted {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := base
+			candidate.RequestID = fmt.Sprintf("oct-125000%d", 4+index)
+			candidate.RouteType = string(tt.routeType)
+			candidate.RouteFormat = string(tt.routeFormat)
+			if !isStructuredImageRelayLog(candidate) {
+				t.Fatal("structured image route was not recognized at persistence boundary")
+			}
+			if err := RelayLogAdd(context.Background(), candidate); err != nil {
+				t.Fatalf("RelayLogAdd: %v", err)
+			}
+			if err := RelayLogSaveDBTask(context.Background()); err != nil {
+				t.Fatalf("RelayLogSaveDBTask: %v", err)
+			}
+			var persisted model.RelayLog
+			if err := db.GetDB().Where("request_id = ?", candidate.RequestID).First(&persisted).Error; err != nil {
+				t.Fatalf("load persisted relay log: %v", err)
+			}
+			if persisted.RequestContent != "" || persisted.ResponseContent != "" || persisted.Error != "" {
+				t.Fatalf("persisted image route was not metadata-only: %+v", persisted)
+			}
+			result, err := AuditImageRelayLog(context.Background(), candidate.RequestID, "")
+			if err != nil || !result.Pass {
+				t.Fatalf("metadata-only structured image route failed audit: result=%+v err=%v", result, err)
+			}
+		})
+	}
+
+	chat := base
+	chat.RequestID = "oct-1250006"
+	chat.RouteType = string(llm.RequestTypeChat)
+	chat.RouteFormat = string(llm.APIFormatOpenAIChatCompletion)
+	if isStructuredImageRelayLog(chat) {
+		t.Fatal("chat type plus chat format was classified as image")
+	}
+	if err := RelayLogAdd(context.Background(), chat); err != nil {
+		t.Fatalf("RelayLogAdd chat: %v", err)
+	}
+	if err := RelayLogSaveDBTask(context.Background()); err != nil {
+		t.Fatalf("RelayLogSaveDBTask chat: %v", err)
+	}
+	var persistedChat model.RelayLog
+	if err := db.GetDB().Where("request_id = ?", chat.RequestID).First(&persistedChat).Error; err != nil {
+		t.Fatalf("load persisted chat log: %v", err)
+	}
+	if persistedChat.RequestContent != chat.RequestContent || persistedChat.ResponseContent != chat.ResponseContent {
+		t.Fatalf("non-image logging behavior regressed: %+v", persistedChat)
+	}
+	if _, err := AuditImageRelayLog(context.Background(), chat.RequestID, ""); err == nil {
+		t.Fatal("non-image log passed image audit")
 	}
 }
 

@@ -75,17 +75,7 @@ func (m *RelayMetrics) isImageRoute() bool {
 	if m == nil {
 		return false
 	}
-	if m.RouteType == llm.RequestTypeImage {
-		return true
-	}
-	switch m.RouteFormat {
-	case llm.APIFormatOpenAIImageGeneration,
-		llm.APIFormatOpenAIImageEdit,
-		llm.APIFormatOpenAIImageVariation:
-		return true
-	default:
-		return false
-	}
+	return model.IsImageRoute(string(m.RouteType), string(m.RouteFormat))
 }
 
 func (m *RelayMetrics) captureResponse(response []byte) {

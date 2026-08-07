@@ -8,7 +8,6 @@ import (
 
 	"github.com/bestruirui/octopus/internal/db"
 	"github.com/bestruirui/octopus/internal/model"
-	"github.com/looplj/axonhub/llm"
 )
 
 var (
@@ -31,7 +30,7 @@ type ImageRelayLogAuditResult struct {
 }
 
 func isStructuredImageRelayLog(relayLog model.RelayLog) bool {
-	return relayLog.RouteType == string(llm.RequestTypeImage) || isImageRouteFormat(relayLog.RouteFormat)
+	return model.IsImageRoute(relayLog.RouteType, relayLog.RouteFormat)
 }
 
 func metadataOnlyImageRelayLog(relayLog model.RelayLog) model.RelayLog {
@@ -121,7 +120,7 @@ func AuditImageRelayLog(ctx context.Context, requestID, receiptID string) (Image
 // ValidateImageRelayLogAudit verifies the stored row by shape, not by searching for known canaries.
 // Passing means forbidden content has no populated relay_logs field in which it could be recovered.
 func ValidateImageRelayLogAudit(relayLog model.RelayLog) error {
-	if relayLog.RouteType != string(llm.RequestTypeImage) || !isImageRouteFormat(relayLog.RouteFormat) {
+	if !model.IsImageRoute(relayLog.RouteType, relayLog.RouteFormat) {
 		return fmt.Errorf("relay log is not a structured image route")
 	}
 	if relayLog.RequestModelName == "" || !validPublicMetadata(relayLog.RequestModelName) {
@@ -156,17 +155,6 @@ func ValidateImageRelayLogAudit(relayLog model.RelayLog) error {
 		return fmt.Errorf("non-allowlisted image metrics are populated")
 	}
 	return nil
-}
-
-func isImageRouteFormat(routeFormat string) bool {
-	switch llm.APIFormat(routeFormat) {
-	case llm.APIFormatOpenAIImageGeneration,
-		llm.APIFormatOpenAIImageEdit,
-		llm.APIFormatOpenAIImageVariation:
-		return true
-	default:
-		return false
-	}
 }
 
 func validAuditIdentifier(value string) bool {
