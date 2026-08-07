@@ -212,6 +212,12 @@ before a provider call. A successful provider response must contain exactly one
 HTTPS URL; any other response shape fails closed with HTTP `502` before content
 is written to the client.
 
+The Luchikey channel uses its documented asynchronous Job transport: one create
+request, polling of that same Job every three seconds, and normalization to one
+HTTPS URL. Its fixed `ratio=1:1`, `quality=standard`, and `count=1` fields are
+private transport settings; they are neither accepted from callers nor exposed
+as product capabilities.
+
 ## 📸 Screenshots
 
 ### 🖥️ Desktop

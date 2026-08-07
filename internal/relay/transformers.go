@@ -34,7 +34,7 @@ func newInbound(format llm.APIFormat) transformer.Inbound {
 	}
 }
 
-func newOutbound(channelType llm.APIFormat, request *llm.Request, baseURL, key string) (transformer.Outbound, error) {
+func newOutbound(channelType llm.APIFormat, request *llm.Request, baseURL, key, requestID string) (transformer.Outbound, error) {
 	requestType := llm.RequestTypeChat
 	if request != nil && request.RequestType != "" {
 		requestType = request.RequestType
@@ -68,6 +68,8 @@ func newOutbound(channelType llm.APIFormat, request *llm.Request, baseURL, key s
 			return gemini.NewOutboundTransformer(baseURL, key)
 		case dbmodel.ChannelTypeDoubao:
 			return doubao.NewOutboundTransformer(baseURL, key)
+		case dbmodel.ChannelTypeLuchikeyImageJobs:
+			return newLuchikeyImageJobsOutbound(baseURL, key, requestID)
 		default:
 			return nil, fmt.Errorf("channel type %s is not compatible with %s request", channelType, requestType)
 		}

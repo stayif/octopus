@@ -198,6 +198,11 @@ Provider 私有字段均为空时，审计才通过。HTTP `200` 且 `data.pass=
 拒绝。Provider 成功响应必须恰好包含一个 HTTPS URL；其他响应形状会在任何
 内容写给客户端前 fail closed，并返回 HTTP `502`。
 
+Luchikey channel 使用其官方异步 Job transport：只创建一次任务，每三秒轮询同一个
+Job，最终归一化为一个 HTTPS URL。固定的 `ratio=1:1`、`quality=standard`、
+`count=1` 仅为 Provider 私有 transport 配置，既不接受调用方传入，也不作为产品能力
+对外暴露。
+
 ## 📸 界面预览
 
 ### 🖥️ 桌面端

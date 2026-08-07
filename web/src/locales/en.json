@@ -531,6 +531,7 @@
             "typeOpenAIResponse": "OpenAI Response",
             "typeOpenAIEmbedding": "OpenAI Embedding",
             "typeOpenAIImageGeneration": "OpenAI Images",
+            "typeLuchikeyImageJobs": "Luchikey Image Jobs",
             "typeAnthropic": "Anthropic",
             "typeGemini": "Gemini",
             "typeVolcengine": "Volcengine",

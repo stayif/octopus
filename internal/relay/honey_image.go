@@ -72,6 +72,9 @@ func restoreHoneyImageResponseFormat(outbound *httpclient.Request, requestModel 
 	if outbound == nil || requestModel != honeyImageModel || outbound.APIFormat != llm.APIFormatOpenAIImageGeneration.String() {
 		return nil
 	}
+	if outbound.Metadata[luchikeyImageJobTransportMetadata] == "true" {
+		return enforceLuchikeyImageJobPrivateTransport(outbound)
+	}
 	var body map[string]any
 	if err := json.Unmarshal(outbound.Body, &body); err != nil {
 		return fmt.Errorf("restore honey image response format: %w", err)
