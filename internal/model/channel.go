@@ -15,7 +15,10 @@ const (
 	AutoGroupTypeRegex AutoGroupType = 3 //正则匹配
 )
 
-const ChannelTypeDoubao llm.APIFormat = "doubao"
+const (
+	ChannelTypeDoubao            llm.APIFormat = "doubao"
+	ChannelTypeLuchikeyImageJobs llm.APIFormat = "luchikey/image_jobs"
+)
 
 type Channel struct {
 	ID            int            `json:"id" gorm:"primaryKey"`

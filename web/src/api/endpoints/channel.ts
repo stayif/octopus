@@ -13,6 +13,8 @@ export enum ChannelType {
     Gemini = 'gemini/contents',
     Volcengine = 'doubao',
     OpenAIEmbedding = 'openai/embeddings',
+    OpenAIImageGeneration = 'openai/image_generation',
+    LuchikeyImageJobs = 'luchikey/image_jobs',
 }
 
 /**
