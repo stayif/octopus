@@ -31,7 +31,7 @@ func TestLuchikeyImageJobsCreatesOncePollsSameJobAndNormalizesSuccess(t *testing
 		case 1:
 			return imageJobResponse(http.StatusOK, `{"ok":true,"data":{"id":"relay_success","status":"running"}}`), nil
 		case 2:
-			return imageJobResponse(http.StatusOK, `{"ok":true,"data":{"job_id":"relay_success","status":"succeeded","requested_size":"1024x1024","actual_size":"1254x1254","result":{"data":[{"url":"/api/relay/image-jobs/relay_success/files/output-1.png?token=signed-canary"}]}}}`), nil
+			return imageJobResponse(http.StatusOK, `{"ok":true,"data":{"job_id":"relay_success","status":"succeeded","requested_size":"1024x1024","actual_size":"1254x1254","result":{"data":[{"url":"/api/relay/image-jobs/relay_success/files/output-1.png?token=signed-canary"}],"images":[{"url":"/api/relay/image-jobs/relay_success/files/output-1.png?token=signed-canary"}]}}}`), nil
 		default:
 			t.Fatalf("unexpected provider request %d: %s %s", call, request.Method, request.URL)
 			return nil, errors.New("unexpected provider request")
@@ -74,6 +74,20 @@ func TestLuchikeyImageJobsCreatesOncePollsSameJobAndNormalizesSuccess(t *testing
 	wantURL := baseURL + resultPath
 	if llmResponse.Image == nil || len(llmResponse.Image.Data) != 1 || llmResponse.Image.Data[0].URL != wantURL || llmResponse.Image.Data[0].B64JSON != "" {
 		t.Fatalf("normalized image response shape is invalid")
+	}
+}
+
+func TestLuchikeyImageJobsRejectsConflictingResultViews(t *testing.T) {
+	job := luchikeyImageJobData{
+		Result: &luchikeyImageJobResult{
+			Data: []luchikeyImageJobImage{{URL: "/api/relay/image-jobs/relay_conflict/files/output-1.png?token=first"}},
+			Images: []json.RawMessage{
+				json.RawMessage(`{"url":"/api/relay/image-jobs/relay_conflict/files/output-2.png?token=second"}`),
+			},
+		},
+	}
+	if _, err := job.singleHTTPSImageURL("https://image.luchikey.test"); err == nil {
+		t.Fatal("conflicting provider result views were accepted")
 	}
 }
 

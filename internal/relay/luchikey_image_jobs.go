@@ -368,6 +368,9 @@ func (job luchikeyImageJobData) singleHTTPSImageURL(baseURL string) (string, err
 	if job.Result == nil {
 		return "", fmt.Errorf("missing luchikey image job result")
 	}
+	if len(job.Result.Data) > 1 || len(job.Result.Images) > 1 {
+		return "", fmt.Errorf("luchikey image job did not return exactly one URL")
+	}
 	candidates := append([]luchikeyImageJobImage(nil), job.Result.Data...)
 	for _, rawImage := range job.Result.Images {
 		var imageURL string
@@ -381,10 +384,19 @@ func (job luchikeyImageJobData) singleHTTPSImageURL(baseURL string) (string, err
 		}
 		candidates = append(candidates, image)
 	}
-	if len(candidates) != 1 || candidates[0].URL == "" || candidates[0].B64JSON != "" {
+	if len(candidates) == 0 {
 		return "", fmt.Errorf("luchikey image job did not return exactly one URL")
 	}
-	parsedURL, err := url.Parse(candidates[0].URL)
+	imageURL := candidates[0].URL
+	for _, candidate := range candidates {
+		// Successful Job responses expose the same single image through both
+		// result.data and result.images. Treat those as two views of one output,
+		// while continuing to reject multiple URLs or any base64 result.
+		if candidate.URL == "" || candidate.URL != imageURL || candidate.B64JSON != "" {
+			return "", fmt.Errorf("luchikey image job did not return exactly one URL")
+		}
+	}
+	parsedURL, err := url.Parse(imageURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid luchikey image job URL")
 	}
