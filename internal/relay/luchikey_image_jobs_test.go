@@ -93,6 +93,61 @@ func TestLuchikeyImageJobsFailedJobDoesNotRepeatCreateOrLeakProviderError(t *tes
 	assertExactlyOneImageJobCreate(t, recorder.calls)
 }
 
+func TestLuchikeyImageJobsRecoversAmbiguousCreateWithoutRepeatingCreate(t *testing.T) {
+	const (
+		baseURL     = "https://image.luchikey.test"
+		clientJobID = "oct-126-recovered"
+		jobID       = "relay_recovered"
+	)
+	recorder := &recordingImageJobExecutor{do: func(call int, request *httpclient.Request) (*httpclient.Response, error) {
+		switch call {
+		case 0:
+			return nil, &httpclient.Error{StatusCode: http.StatusBadGateway, Body: []byte(`{"error":"provider-private-create-error"}`)}
+		case 1:
+			if request.Method != http.MethodGet || request.URL != baseURL+luchikeyImageJobRecoveryPath+"?client_job_id="+clientJobID {
+				t.Fatalf("recovery request = %s %s", request.Method, request.URL)
+			}
+			return imageJobResponse(http.StatusOK, `{"ok":true,"data":{"jobs":[{"id":"relay_recovered","client_job_id":"oct-126-recovered","status":"running"}],"data":[{"id":"relay_recovered","client_job_id":"oct-126-recovered","status":"running"}]}}`), nil
+		case 2:
+			if request.Method != http.MethodGet || request.URL != baseURL+luchikeyImageJobPollPath+jobID {
+				t.Fatalf("poll request = %s %s", request.Method, request.URL)
+			}
+			return imageJobResponse(http.StatusOK, `{"ok":true,"data":{"id":"relay_recovered","client_job_id":"oct-126-recovered","status":"succeeded","result":{"data":[{"url":"/api/relay/image-jobs/relay_recovered/files/output.png?token=signed-canary"}]}}}`), nil
+		default:
+			t.Fatalf("unexpected provider request %d", call)
+			return nil, errors.New("unexpected provider request")
+		}
+	}}
+	outbound, createRequest := testLuchikeyImageJobsOutbound(t, baseURL, clientJobID)
+	response, err := outbound.CustomizeExecutor(recorder).Do(t.Context(), createRequest)
+	if err != nil {
+		t.Fatalf("recover ambiguous create: %v", err)
+	}
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatal("recovered image response is missing")
+	}
+	assertExactlyOneImageJobCreate(t, recorder.calls)
+}
+
+func TestLuchikeyImageJobsMissingRecoveryDoesNotRepeatCreate(t *testing.T) {
+	recorder := &recordingImageJobExecutor{do: func(call int, _ *httpclient.Request) (*httpclient.Response, error) {
+		if call == 0 {
+			return nil, &httpclient.Error{StatusCode: http.StatusBadGateway, Body: []byte(`{"error":"provider-private-create-error"}`)}
+		}
+		return imageJobResponse(http.StatusOK, `{"ok":true,"data":{"jobs":[],"data":[],"items":[],"total":0}}`), nil
+	}}
+	outbound, createRequest := testLuchikeyImageJobsOutbound(t, "https://image.luchikey.test", "oct-126-not-created")
+	_, err := outbound.CustomizeExecutor(recorder).Do(t.Context(), createRequest)
+	if err == nil {
+		t.Fatal("missing recovered Job returned no error")
+	}
+	assertSafeImageJobError(t, err, http.StatusBadGateway, "provider-private-create-error")
+	assertExactlyOneImageJobCreate(t, recorder.calls)
+	if len(recorder.calls) != 2 || recorder.calls[1].Method != http.MethodGet {
+		t.Fatal("ambiguous create was not followed by exactly one read-only recovery query")
+	}
+}
+
 func TestLuchikeyImageJobsTimeoutDoesNotRepeatCreate(t *testing.T) {
 	recorder := &recordingImageJobExecutor{do: func(call int, _ *httpclient.Request) (*httpclient.Response, error) {
 		if call == 0 {

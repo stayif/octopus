@@ -214,9 +214,11 @@ is written to the client.
 
 The Luchikey channel uses its documented asynchronous Job transport: one create
 request, polling of that same Job every three seconds, and normalization to one
-HTTPS URL. Its fixed `ratio=1:1`, `quality=standard`, and `count=1` fields are
-private transport settings; they are neither accepted from callers nor exposed
-as product capabilities.
+HTTPS URL. If the create response is ambiguous, it performs one read-only
+`client_job_id` recovery query and continues only a uniquely matched existing
+Job; it never repeats the create request. Its fixed `ratio=1:1`,
+`quality=standard`, and `count=1` fields are private transport settings; they
+are neither accepted from callers nor exposed as product capabilities.
 
 ## 📸 Screenshots
 

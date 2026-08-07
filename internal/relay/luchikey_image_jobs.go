@@ -22,6 +22,7 @@ const (
 	luchikeyImageJobTransportMetadata = "octopus.luchikey_image_job_transport"
 	luchikeyImageJobCreatePath        = "/api/relay/image-jobs/generations"
 	luchikeyImageJobPollPath          = "/api/relay/image-jobs/"
+	luchikeyImageJobRecoveryPath      = "/api/relay/image-jobs"
 	luchikeyImageJobRatio             = "1:1"
 	luchikeyImageJobQuality           = "standard"
 	luchikeyImageJobCount             = 1
@@ -138,12 +139,21 @@ func (e *luchikeyImageJobsExecutor) Do(ctx context.Context, request *httpclient.
 	defer cancel()
 
 	createResponse, err := e.Executor.Do(jobCtx, request)
-	if err != nil {
-		return nil, sanitizeLuchikeyImageJobExecutorError(jobCtx, err, request.Method, request.URL)
-	}
-	job, err := parseLuchikeyImageJobResponse(createResponse)
-	if err != nil {
-		return nil, safeLuchikeyImageJobHTTPError(http.StatusBadGateway, request.Method, request.URL)
+	var job luchikeyImageJobData
+	if err == nil {
+		job, err = parseLuchikeyImageJobResponse(createResponse)
+		if err != nil {
+			return nil, safeLuchikeyImageJobHTTPError(http.StatusBadGateway, request.Method, request.URL)
+		}
+	} else {
+		// The provider documents client_job_id recovery for ambiguous create
+		// failures. Query once and continue only an already-created Job; never
+		// repeat the POST, even when the create response was a timeout or 5xx.
+		recovered, found := e.recoverCreatedJob(jobCtx, request, err)
+		if !found {
+			return nil, sanitizeLuchikeyImageJobExecutorError(jobCtx, err, request.Method, request.URL)
+		}
+		job = recovered
 	}
 	if job.ClientJobID != "" && job.ClientJobID != e.clientJobID {
 		return nil, safeLuchikeyImageJobHTTPError(http.StatusBadGateway, request.Method, request.URL)
@@ -200,6 +210,28 @@ func (e *luchikeyImageJobsExecutor) Do(ctx context.Context, request *httpclient.
 	}
 }
 
+func (e *luchikeyImageJobsExecutor) recoverCreatedJob(ctx context.Context, createRequest *httpclient.Request, createErr error) (luchikeyImageJobData, bool) {
+	if ctx.Err() != nil || createRequest == nil || !ambiguousLuchikeyImageJobCreateError(createErr) {
+		return luchikeyImageJobData{}, false
+	}
+	recoveryURL := e.baseURL + luchikeyImageJobRecoveryPath + "?" + url.Values{"client_job_id": []string{e.clientJobID}}.Encode()
+	recoveryRequest := &httpclient.Request{
+		Method:                http.MethodGet,
+		URL:                   recoveryURL,
+		Headers:               createRequest.Headers.Clone(),
+		RequestType:           llm.RequestTypeImage.String(),
+		APIFormat:             llm.APIFormatOpenAIImageGeneration.String(),
+		TransformerMetadata:   createRequest.TransformerMetadata,
+		SkipInboundQueryMerge: true,
+	}
+	recoveryResponse, err := e.Executor.Do(ctx, recoveryRequest)
+	if err != nil {
+		return luchikeyImageJobData{}, false
+	}
+	job, err := parseLuchikeyImageJobRecoveryResponse(recoveryResponse, e.clientJobID)
+	return job, err == nil
+}
+
 func (e *luchikeyImageJobsExecutor) DoStream(context.Context, *httpclient.Request) (streams.Stream[*httpclient.StreamEvent], error) {
 	return nil, fmt.Errorf("luchikey image jobs does not support streaming")
 }
@@ -245,6 +277,17 @@ type luchikeyImageJobEnvelope struct {
 	Data luchikeyImageJobData `json:"data"`
 }
 
+type luchikeyImageJobRecoveryEnvelope struct {
+	OK   bool                         `json:"ok"`
+	Data luchikeyImageJobRecoveryData `json:"data"`
+}
+
+type luchikeyImageJobRecoveryData struct {
+	Jobs  []luchikeyImageJobData `json:"jobs"`
+	Data  []luchikeyImageJobData `json:"data"`
+	Items []luchikeyImageJobData `json:"items"`
+}
+
 type luchikeyImageJobData struct {
 	ID          string                  `json:"id"`
 	JobID       string                  `json:"job_id"`
@@ -279,6 +322,27 @@ func parseLuchikeyImageJobResponse(response *httpclient.Response) (luchikeyImage
 		return luchikeyImageJobData{}, fmt.Errorf("invalid luchikey image job response")
 	}
 	return envelope.Data, nil
+}
+
+func parseLuchikeyImageJobRecoveryResponse(response *httpclient.Response, clientJobID string) (luchikeyImageJobData, error) {
+	if response == nil || len(response.Body) == 0 {
+		return luchikeyImageJobData{}, fmt.Errorf("invalid luchikey image job recovery response")
+	}
+	var envelope luchikeyImageJobRecoveryEnvelope
+	if err := json.Unmarshal(response.Body, &envelope); err != nil || !envelope.OK {
+		return luchikeyImageJobData{}, fmt.Errorf("invalid luchikey image job recovery response")
+	}
+	jobs := envelope.Data.Jobs
+	if jobs == nil {
+		jobs = envelope.Data.Data
+	}
+	if jobs == nil {
+		jobs = envelope.Data.Items
+	}
+	if len(jobs) != 1 || jobs[0].ClientJobID != clientJobID {
+		return luchikeyImageJobData{}, fmt.Errorf("luchikey image job recovery did not return exactly one matching job")
+	}
+	return jobs[0], nil
 }
 
 func (job luchikeyImageJobData) providerJobID() (string, error) {
@@ -401,6 +465,14 @@ func retryLuchikeyImageJobPoll(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
 	}
+	var httpErr *httpclient.Error
+	if !errors.As(err, &httpErr) {
+		return true
+	}
+	return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= http.StatusInternalServerError
+}
+
+func ambiguousLuchikeyImageJobCreateError(err error) bool {
 	var httpErr *httpclient.Error
 	if !errors.As(err, &httpErr) {
 		return true
