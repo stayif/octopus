@@ -45,6 +45,10 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 	if err != nil {
 		return nil, err
 	}
+	if err := applyHoneyImageRequestPolicy(inboundType, internalRequest); err != nil {
+		resp.Error(c, http.StatusBadRequest, err.Error())
+		return nil, err
+	}
 
 	if supportedModels := c.GetString("supported_models"); supportedModels != "" {
 		if !slices.Contains(strings.Split(supportedModels, ","), internalRequest.Model) {
@@ -384,6 +388,11 @@ func (ra *relayAttempt) forward() (int, error) {
 	if result.Response == nil {
 		return 0, fmt.Errorf("empty pipeline response")
 	}
+	if err := validateHoneyImageResponse(ra.metrics.RequestModel, result.Response.Body); err != nil {
+		ra.metrics.ResultCode = http.StatusBadGateway
+		resp.Error(ra.c, http.StatusBadGateway, "provider image response failed validation")
+		return http.StatusBadGateway, err
+	}
 	ra.metrics.captureResponse(result.Response.Body)
 	statusCode := result.Response.StatusCode
 	if statusCode == 0 {
@@ -404,7 +413,7 @@ func (ra *relayAttempt) forward() (int, error) {
 	return statusCode, nil
 }
 
-func (ra *relayAttempt) applyChannelRequestOptions(outboundRequest *httpclient.Request) {
+func (ra *relayAttempt) applyChannelRequestOptions(outboundRequest *httpclient.Request) error {
 	// ParamOverride 只覆盖 JSON 请求体；multipart 图片编辑等请求不能按 map 合并。
 	if ra.channel.ParamOverride != nil && *ra.channel.ParamOverride != "" && strings.Contains(strings.ToLower(outboundRequest.Headers.Get("Content-Type")+" "+outboundRequest.ContentType), "application/json") {
 		var bodyMap map[string]any
@@ -428,6 +437,9 @@ func (ra *relayAttempt) applyChannelRequestOptions(outboundRequest *httpclient.R
 			}
 		}
 	}
+	if err := restoreHoneyImageResponseFormat(outboundRequest, ra.metrics.RequestModel); err != nil {
+		return err
+	}
 	for _, header := range ra.channel.CustomHeader {
 		// pipeline 在 raw request middleware 前已经写入 Auth；同名敏感头保持认证配置优先，延续旧 BuildHttpRequest 的覆盖顺序。
 		if outboundRequest.Headers.Get(header.HeaderKey) != "" && httpclient.IsSensitiveHeader(header.HeaderKey) {
@@ -435,6 +447,7 @@ func (ra *relayAttempt) applyChannelRequestOptions(outboundRequest *httpclient.R
 		}
 		outboundRequest.Headers.Set(header.HeaderKey, header.HeaderValue)
 	}
+	return nil
 }
 
 // writeStream 把 pipeline 输出的客户端格式流写回请求方，并保留首 token 超时切换通道的行为。
@@ -581,7 +594,9 @@ func (m *relayPipelineMiddleware) OnOutboundRawRequest(ctx context.Context, requ
 	if request.Headers == nil {
 		request.Headers = make(http.Header)
 	}
-	m.attempt.applyChannelRequestOptions(request)
+	if err := m.attempt.applyChannelRequestOptions(request); err != nil {
+		return nil, err
+	}
 	return request, nil
 }
 

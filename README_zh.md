@@ -190,6 +190,14 @@ Provider 私有字段均为空时，审计才通过。HTTP `200` 且 `data.pass=
 通过；`404` 表示未找到对应日志；`409` 表示审计失败。响应不会返回请求、
 响应或 Provider payload 正文。
 
+### `honey-image-v1` 能力边界
+
+`honey-image-v1` 是有意收窄的双 Provider 产品路由。仅接受 `prompt`、可选的
+`n=1` 和可选的 `response_format=url`；后两项省略时使用该默认值。`size`、
+`quality`、base64、多图以及其他生图参数都会在调用 Provider 前以 HTTP `400`
+拒绝。Provider 成功响应必须恰好包含一个 HTTPS URL；其他响应形状会在任何
+内容写给客户端前 fail closed，并返回 HTTP `502`。
+
 ## 📸 界面预览
 
 ### 🖥️ 桌面端

@@ -530,6 +530,7 @@
             "typeOpenAIChat": "OpenAI Chat",
             "typeOpenAIResponse": "OpenAI Response",
             "typeOpenAIEmbedding": "OpenAI Embedding",
+            "typeOpenAIImageGeneration": "OpenAI 圖像生成",
             "typeAnthropic": "Anthropic",
             "typeGemini": "Gemini",
             "typeVolcengine": "火山引擎",

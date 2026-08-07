@@ -202,6 +202,16 @@ fields. HTTP `200` with `data.pass=true` is a pass; `404` means no matching row,
 and `409` is an audit failure. The response never returns request, response, or
 provider payload content.
 
+### `honey-image-v1` capability boundary
+
+`honey-image-v1` is the deliberately narrow dual-provider product route. It
+accepts `prompt`, optional `n=1`, and optional `response_format=url`. Omitting
+the latter two fields applies those defaults. `size`, `quality`, base64 output,
+multiple images, and all other image options are rejected with HTTP `400`
+before a provider call. A successful provider response must contain exactly one
+HTTPS URL; any other response shape fails closed with HTTP `502` before content
+is written to the client.
+
 ## 📸 Screenshots
 
 ### 🖥️ Desktop
