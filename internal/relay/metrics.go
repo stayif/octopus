@@ -16,9 +16,17 @@ import (
 
 // RelayMetrics 负责最终的日志收集与持久化
 type RelayMetrics struct {
-	APIKeyID     int
-	RequestModel string
-	StartTime    time.Time
+	APIKeyID        int
+	RequestModel    string
+	StartTime       time.Time
+	RequestID       string
+	ReceiptID       string
+	RouteType       llm.RequestType
+	RouteFormat     llm.APIFormat
+	ProfileID       string
+	ProfileVersion  string
+	GenerationCount int
+	ResultCode      int
 
 	// 首 Token 时间
 	FirstTokenTime time.Time
@@ -35,6 +43,56 @@ type RelayMetrics struct {
 
 	// 参数覆盖
 	ParamOverride string
+}
+
+func newRelayMetrics(apiKeyID int, request *llm.Request, routeFormat llm.APIFormat, startTime time.Time) *RelayMetrics {
+	metrics := &RelayMetrics{
+		APIKeyID:    apiKeyID,
+		StartTime:   startTime,
+		RouteFormat: routeFormat,
+	}
+	if request == nil {
+		return metrics
+	}
+
+	metrics.RequestModel = request.Model
+	metrics.ActualModel = request.Model
+	metrics.RouteType = request.RequestType
+	if metrics.isImageRoute() {
+		metrics.GenerationCount = 1
+		if request.Image != nil && request.Image.N != nil && *request.Image.N > 0 {
+			metrics.GenerationCount = int(*request.Image.N)
+		}
+		return metrics
+	}
+
+	// 非图片路由继续保留既有的请求日志行为；图片路由不在 metrics 中复制 prompt 或输入图片。
+	metrics.InternalRequest = request
+	return metrics
+}
+
+func (m *RelayMetrics) isImageRoute() bool {
+	if m == nil {
+		return false
+	}
+	if m.RouteType == llm.RequestTypeImage {
+		return true
+	}
+	switch m.RouteFormat {
+	case llm.APIFormatOpenAIImageGeneration,
+		llm.APIFormatOpenAIImageEdit,
+		llm.APIFormatOpenAIImageVariation:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *RelayMetrics) captureResponse(response []byte) {
+	if m == nil || m.isImageRoute() {
+		return
+	}
+	m.InternalResponse = append(m.InternalResponse[:0], response...)
 }
 
 func (m *RelayMetrics) RecordUsage(usage *llm.Usage) {
@@ -74,6 +132,13 @@ func (m *RelayMetrics) RecordUsage(usage *llm.Usage) {
 
 func (m *RelayMetrics) Save(ctx context.Context, success bool, err error, attempts []model.ChannelAttempt) {
 	duration := time.Since(m.StartTime)
+	if m.ResultCode == 0 {
+		if success {
+			m.ResultCode = 200
+		} else {
+			m.ResultCode = 502
+		}
+	}
 
 	globalStats := model.StatsMetrics{
 		WaitTime:    duration.Milliseconds(),
@@ -130,20 +195,45 @@ func finalChannel(attempts []model.ChannelAttempt) (int, string) {
 }
 
 func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Duration, attempts []model.ChannelAttempt, channelID int, channelName string) {
+	relayLog := m.buildRelayLog(err, duration, attempts, channelID, channelName)
+
+	if !m.isImageRoute() {
+		if apiKey, getErr := op.APIKeyGet(m.APIKeyID, ctx); getErr == nil {
+			relayLog.RequestAPIKeyName = apiKey.Name
+		}
+	}
+
+	if logErr := op.RelayLogAdd(ctx, relayLog); logErr != nil {
+		log.Warnf("failed to save relay log: %v", logErr)
+	}
+}
+
+func (m *RelayMetrics) buildRelayLog(err error, duration time.Duration, attempts []model.ChannelAttempt, channelID int, channelName string) model.RelayLog {
 	relayLog := model.RelayLog{
 		Time:             m.StartTime.Unix(),
 		RequestModelName: m.RequestModel,
-		ChannelName:      channelName,
-		ChannelId:        channelID,
-		ActualModelName:  m.ActualModel,
 		UseTime:          int(duration.Milliseconds()),
-		Attempts:         attempts,
 		TotalAttempts:    len(attempts),
+		RequestID:        m.RequestID,
+		ReceiptID:        m.ReceiptID,
+		RouteType:        string(m.RouteType),
+		RouteFormat:      string(m.RouteFormat),
+		ProfileID:        m.ProfileID,
+		ProfileVersion:   m.ProfileVersion,
+		GenerationCount:  m.GenerationCount,
+		ResultCode:       m.ResultCode,
 	}
 
-	if apiKey, getErr := op.APIKeyGet(m.APIKeyID, ctx); getErr == nil {
-		relayLog.RequestAPIKeyName = apiKey.Name
+	// 图片日志严格使用白名单：上面的公开产品模型、route、profile/count、耗时、结果码和审计 ID。
+	// 不保存 provider/channel、token/cost、请求/响应、错误正文或 attempt 明细。
+	if m.isImageRoute() {
+		return relayLog
 	}
+
+	relayLog.ChannelName = channelName
+	relayLog.ChannelId = channelID
+	relayLog.ActualModelName = m.ActualModel
+	relayLog.Attempts = attempts
 
 	// 首字时间
 	if !m.FirstTokenTime.IsZero() {
@@ -164,10 +254,7 @@ func (m *RelayMetrics) saveLog(ctx context.Context, err error, duration time.Dur
 	if err != nil {
 		relayLog.Error = err.Error()
 	}
-
-	if logErr := op.RelayLogAdd(ctx, relayLog); logErr != nil {
-		log.Warnf("failed to save relay log: %v", logErr)
-	}
+	return relayLog
 }
 
 func (m *RelayMetrics) requestContent() string {

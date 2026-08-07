@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -27,6 +28,10 @@ func init() {
 		AddRoute(
 			router.NewRoute("/stream-token", http.MethodGet).
 				Handle(getStreamToken),
+		).
+		AddRoute(
+			router.NewRoute("/audit-image", http.MethodGet).
+				Handle(auditImageLog),
 		)
 
 	router.NewGroupRouter("/api/v1/log").
@@ -34,6 +39,21 @@ func init() {
 			router.NewRoute("/stream", http.MethodGet).
 				Handle(streamLog),
 		)
+}
+
+func auditImageLog(c *gin.Context) {
+	result, err := op.AuditImageRelayLog(c.Request.Context(), c.Query("request_id"), c.Query("receipt_id"))
+	if err == nil {
+		resp.Success(c, result)
+		return
+	}
+	status := http.StatusBadRequest
+	if errors.Is(err, op.ErrImageRelayLogNotFound) {
+		status = http.StatusNotFound
+	} else if errors.Is(err, op.ErrImageRelayLogAuditFailed) {
+		status = http.StatusConflict
+	}
+	resp.Error(c, status, err.Error())
 }
 
 func listLog(c *gin.Context) {

@@ -61,6 +61,8 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 	}
 
 	apiKeyID := c.GetInt("api_key_id")
+	requestID := fmt.Sprintf("oct-%d", snowflake.GenerateID())
+	c.Header("X-Octopus-Request-ID", requestID)
 	iter := balancer.NewIterator(group, apiKeyID, internalRequest.Model)
 	if iter.Len() == 0 {
 		err := errors.New("no available channel")
@@ -72,16 +74,11 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 		c:               c,
 		inAdapter:       inAdapter,
 		internalRequest: internalRequest,
-		metrics: &RelayMetrics{
-			APIKeyID:        apiKeyID,
-			RequestModel:    internalRequest.Model,
-			ActualModel:     internalRequest.Model,
-			StartTime:       time.Now(),
-			InternalRequest: internalRequest,
-		},
-		iter:  iter,
-		group: group,
+		metrics:         newRelayMetrics(apiKeyID, internalRequest, inboundType, time.Now()),
+		iter:            iter,
+		group:           group,
 	}
+	run.metrics.RequestID = requestID
 	if c.GetBool("billing_enabled") {
 		if err := run.reserveBilling(); err != nil {
 			return nil, err
@@ -125,11 +122,10 @@ func (r *relayRun) reserveBilling() error {
 		resp.Error(r.c, http.StatusBadRequest, "request cannot be bounded for billing")
 		return err
 	}
-	requestID := fmt.Sprintf("oct-%d", snowflake.GenerateID())
 	reservation, err := client.Reserve(r.c.Request.Context(), billing.ReserveRequest{
 		AccountID:           r.c.GetString("billing_account_id"),
 		APIKeyID:            r.metrics.APIKeyID,
-		RequestID:           requestID,
+		RequestID:           r.metrics.RequestID,
 		MaxChargeMicrounits: maxCharge,
 	})
 	if err != nil {
@@ -146,6 +142,8 @@ func (r *relayRun) reserveBilling() error {
 		return err
 	}
 	r.billing = &billingState{client: client, price: price, reservation: reservation}
+	r.metrics.ReceiptID = "receipt-" + strings.TrimPrefix(reservation.ReservationID, "res-")
+	r.c.Header("X-Octopus-Receipt-ID", r.metrics.ReceiptID)
 	return nil
 }
 
@@ -169,7 +167,7 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 	providerRef := fmt.Sprintf("channel-%d", channelID)
 	_, err = r.billing.client.Settle(detached, billing.SettlementRequest{
 		ReservationID:    r.billing.reservation.ReservationID,
-		ReceiptID:        "receipt-" + strings.TrimPrefix(r.billing.reservation.ReservationID, "res-"),
+		ReceiptID:        r.metrics.ReceiptID,
 		ExternalModel:    r.billing.price.Model,
 		PricingVersion:   r.billing.price.Version,
 		Usage:            r.metrics.BillingUsage,
@@ -187,6 +185,7 @@ func (r *relayRun) run() {
 		select {
 		case <-ctx.Done():
 			log.Infof("request context canceled, stopping retry")
+			r.metrics.ResultCode = 499
 			billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), false)
 			r.metrics.Save(ctx, false, errors.Join(context.Canceled, billingErr), r.iter.Attempts())
 			return
@@ -205,6 +204,9 @@ func (r *relayRun) run() {
 		written, err := attempt.run()
 		if err == nil {
 			if billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), true); billingErr != nil {
+				if !r.c.Writer.Written() {
+					r.metrics.ResultCode = http.StatusBadGateway
+				}
 				r.metrics.Save(ctx, false, billingErr, r.iter.Attempts())
 				if !r.c.Writer.Written() {
 					resp.Error(r.c, http.StatusBadGateway, "billing settlement failed")
@@ -227,6 +229,7 @@ func (r *relayRun) run() {
 	}
 	billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), false)
 	lastErr = errors.Join(lastErr, billingErr)
+	r.metrics.ResultCode = http.StatusBadGateway
 	r.metrics.Save(ctx, false, lastErr, r.iter.Attempts())
 	resp.Error(r.c, http.StatusBadGateway, lastErr.Error())
 }
@@ -284,6 +287,9 @@ func (ra *relayAttempt) run() (bool, error) {
 		upstreamStatusCode = http.StatusOK
 	}
 	ra.usedKey.StatusCode = upstreamStatusCode
+	if upstreamStatusCode != 0 {
+		ra.metrics.ResultCode = upstreamStatusCode
+	}
 	ra.usedKey.LastUseTimeStamp = time.Now().Unix()
 
 	if fwdErr == nil {
@@ -378,7 +384,7 @@ func (ra *relayAttempt) forward() (int, error) {
 	if result.Response == nil {
 		return 0, fmt.Errorf("empty pipeline response")
 	}
-	ra.metrics.InternalResponse = result.Response.Body
+	ra.metrics.captureResponse(result.Response.Body)
 	statusCode := result.Response.StatusCode
 	if statusCode == 0 {
 		statusCode = http.StatusOK
@@ -415,7 +421,9 @@ func (ra *relayAttempt) applyChannelRequestOptions(outboundRequest *httpclient.R
 					log.Warnf("failed to marshal modified body: %v, skipping param_override", err)
 				} else {
 					outboundRequest.Body = modifiedBody
-					ra.metrics.ParamOverride = *ra.channel.ParamOverride
+					if !ra.metrics.isImageRoute() {
+						ra.metrics.ParamOverride = *ra.channel.ParamOverride
+					}
 				}
 			}
 		}
@@ -518,7 +526,7 @@ func (ra *relayAttempt) writeStream(ctx context.Context, clientStream streams.St
 					log.Warnf("failed to aggregate stream response for log: %v", err)
 					return nil
 				}
-				ra.metrics.InternalResponse = responseBody
+				ra.metrics.captureResponse(responseBody)
 				ra.metrics.RecordUsage(meta.Usage)
 				return nil
 			}

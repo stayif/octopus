@@ -41,4 +41,12 @@ type RelayLog struct {
 	Error             string           `json:"error"`                                    // 错误信息
 	Attempts          []ChannelAttempt `json:"attempts" gorm:"serializer:json"`          // 所有尝试记录
 	TotalAttempts     int              `json:"total_attempts"`                           // 总尝试次数
+	RequestID         string           `json:"request_id,omitempty" gorm:"index"`        // Octopus 请求审计 ID
+	ReceiptID         string           `json:"receipt_id,omitempty" gorm:"index"`        // 计费回执 ID（若有）
+	RouteType         string           `json:"route_type,omitempty"`                     // 结构化请求类型
+	RouteFormat       string           `json:"route_format,omitempty"`                   // 结构化 API 格式
+	ProfileID         string           `json:"profile_id,omitempty"`                     // 公开产品 Profile（若有）
+	ProfileVersion    string           `json:"profile_version,omitempty"`                // 公开产品 Profile 版本（若有）
+	GenerationCount   int              `json:"generation_count,omitempty"`               // 生图数量
+	ResultCode        int              `json:"result_code,omitempty"`                    // 最终 HTTP 结果码
 }

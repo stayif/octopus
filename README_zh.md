@@ -175,6 +175,20 @@ http://localhost:3000
 | `OCTOPUS_IMAGES_BODY_TMP_DIR` | Images 请求体临时文件目录(可选，默认 `./cache`) |
 | `OCTOPUS_IMAGES_BODY_TMP_CLEANUP_HOURS` | 启动时清理临时文件的时间阈值(可选，默认 24) |
 
+### 生图 relay log 审计门
+
+生图路由会返回 `X-Octopus-Request-ID`；启用计费的请求还会返回
+`X-Octopus-Receipt-ID`。使用现有已认证的管理会话，且每次只传一个标识：
+
+```text
+GET /api/v1/log/audit-image?request_id=<X-Octopus-Request-ID>
+GET /api/v1/log/audit-image?receipt_id=<X-Octopus-Receipt-ID>
+```
+
+只有对应日志是结构化 image route、符合元数据白名单，且所有内容字段和
+Provider 私有字段均为空时，审计才通过。HTTP `200` 且 `data.pass=true` 表示
+通过；`404` 表示未找到对应日志；`409` 表示审计失败。响应不会返回请求、
+响应或 Provider payload 正文。
 
 ## 📸 界面预览
 
