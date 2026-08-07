@@ -185,6 +185,23 @@ Billing-bound API keys use `billing_enabled`, `owner_account_id`, and
 cost fields (`input`, `output`, `cache_read`, and `cache_write`) remain
 operations-only and never determine the bound account charge.
 
+### Image relay-log audit gate
+
+Image routes return `X-Octopus-Request-ID`; billing-bound requests also return
+`X-Octopus-Receipt-ID`. Using the existing authenticated management session,
+audit exactly one identifier with:
+
+```text
+GET /api/v1/log/audit-image?request_id=<X-Octopus-Request-ID>
+GET /api/v1/log/audit-image?receipt_id=<X-Octopus-Receipt-ID>
+```
+
+The gate passes only when the matching structured image-route row contains the
+allowlisted metadata shape and no content-bearing or provider-private relay-log
+fields. HTTP `200` with `data.pass=true` is a pass; `404` means no matching row,
+and `409` is an audit failure. The response never returns request, response, or
+provider payload content.
+
 ## 📸 Screenshots
 
 ### 🖥️ Desktop

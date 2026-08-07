@@ -124,6 +124,11 @@ func RelayLogAdd(ctx context.Context, relayLog model.RelayLog) error {
 	if !enabled {
 		maxSize = relayLogMaxSizeNoDB
 	}
+	// Persistence boundary defense: structured image routes can never enter cache,
+	// subscribers, or relay_logs with content-bearing/provider-private fields.
+	if isStructuredImageRelayLog(relayLog) {
+		relayLog = metadataOnlyImageRelayLog(relayLog)
+	}
 	relayLog.ID = snowflake.GenerateID()
 	go notifySubscribers(relayLog)
 
