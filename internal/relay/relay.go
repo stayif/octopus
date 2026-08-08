@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ import (
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
 )
+
+var billingEventIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 // Handler 返回处理入站请求并转发到上游服务的 Gin handler。
 func Handler(inboundType llm.APIFormat) gin.HandlerFunc {
@@ -84,20 +87,14 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 	}
 	run.metrics.RequestID = requestID
 	if c.GetBool("billing_enabled") {
-		if err := run.reserveBilling(); err != nil {
+		if err := run.admitBilling(); err != nil {
 			return nil, err
 		}
 	}
 	return run, nil
 }
 
-func (r *relayRun) reserveBilling() error {
-	client := billing.DefaultClient()
-	if client == nil {
-		err := errors.New("billing service is unavailable")
-		resp.Error(r.c, http.StatusServiceUnavailable, err.Error())
-		return err
-	}
+func (r *relayRun) admitBilling() error {
 	info, err := op.LLMInfoGet(r.metrics.RequestModel)
 	if err != nil {
 		resp.Error(r.c, http.StatusServiceUnavailable, "public model billing price is unavailable")
@@ -110,43 +107,45 @@ func (r *relayRun) reserveBilling() error {
 		OutputMicrounitsPerMillion:     info.OutputMicrounitsPerMillion,
 		CacheReadMicrounitsPerMillion:  info.CacheReadMicrounitsPerMillion,
 		CacheWriteMicrounitsPerMillion: info.CacheWriteMicrounitsPerMillion,
+		GenerationMicrounitsPerImage:   info.GenerationMicrounitsPerImage,
 	}
-	var maxOutputTokens int64
-	if r.internalRequest.MaxCompletionTokens != nil {
-		maxOutputTokens = *r.internalRequest.MaxCompletionTokens
-	} else if r.internalRequest.MaxTokens != nil {
-		maxOutputTokens = *r.internalRequest.MaxTokens
-	}
-	requestBytes := 0
-	if r.internalRequest.RawRequest != nil {
-		requestBytes = len(r.internalRequest.RawRequest.Body)
-	}
-	maxCharge, err := billing.MaximumCharge(price, requestBytes, maxOutputTokens)
-	if err != nil {
-		resp.Error(r.c, http.StatusBadRequest, "request cannot be bounded for billing")
+	billingEventID := strings.TrimSpace(r.c.GetHeader("X-Honey-Billing-Event-ID"))
+	if !billingEventIdentifier.MatchString(billingEventID) {
+		err := errors.New("stable billing event ID is required")
+		resp.Error(r.c, http.StatusBadRequest, err.Error())
 		return err
 	}
-	reservation, err := client.Reserve(r.c.Request.Context(), billing.ReserveRequest{
-		AccountID:           r.c.GetString("billing_account_id"),
-		APIKeyID:            r.metrics.APIKeyID,
-		RequestID:           r.metrics.RequestID,
-		MaxChargeMicrounits: maxCharge,
+	client := billing.DefaultClient()
+	if client == nil {
+		log.Warnf("billing admission unavailable for event %s; continuing fail-open", billingEventID)
+		return nil
+	}
+	accountID := r.c.GetString("billing_account_id")
+	admission, err := client.Admit(r.c.Request.Context(), billing.AdmissionRequest{
+		AccountID:      accountID,
+		APIKeyID:       r.metrics.APIKeyID,
+		BillingEventID: billingEventID,
 	})
 	if err != nil {
-		status := http.StatusServiceUnavailable
-		if strings.Contains(err.Error(), "HTTP 402") {
-			status = http.StatusPaymentRequired
+		if status, ok := billing.StatusCode(err); ok && status < http.StatusInternalServerError {
+			resp.Error(r.c, status, "billing admission rejected")
+			return err
 		}
-		resp.Error(r.c, status, "billing reservation rejected")
-		return err
+		log.Warnf("billing admission failed for event %s; continuing fail-open: %v", billingEventID, err)
+		return nil
 	}
-	if reservation.Status != "RESERVED" || reservation.ReservedMicrounits < maxCharge {
-		err := errors.New("billing reservation is invalid")
-		resp.Error(r.c, http.StatusServiceUnavailable, err.Error())
-		return err
+	if admission.ReceiptID == "" || (admission.Status != "ALLOWED" && admission.Status != "REPLAYED") {
+		log.Warnf("billing admission was invalid for event %s; continuing fail-open", billingEventID)
+		return nil
 	}
-	r.billing = &billingState{client: client, price: price, reservation: reservation}
-	r.metrics.ReceiptID = "receipt-" + strings.TrimPrefix(reservation.ReservationID, "res-")
+	r.billing = &billingState{
+		client:         client,
+		price:          price,
+		admission:      admission,
+		accountID:      accountID,
+		billingEventID: billingEventID,
+	}
+	r.metrics.ReceiptID = admission.ReceiptID
 	r.c.Header("X-Octopus-Receipt-ID", r.metrics.ReceiptID)
 	return nil
 }
@@ -155,26 +154,41 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 	if r.billing == nil {
 		return nil
 	}
-	detached := context.WithoutCancel(ctx)
-	if !r.metrics.UsageObserved {
-		_, cancelErr := r.billing.client.Cancel(detached, r.billing.reservation.ReservationID)
-		if success {
-			return errors.Join(errors.New("successful provider response is missing verifiable usage"), cancelErr)
-		}
-		return cancelErr
+	if !success {
+		return nil
 	}
-	charge, err := billing.CalculateCharge(r.billing.price, r.metrics.BillingUsage)
+	detached := context.WithoutCancel(ctx)
+	chargeKind := billing.ChargeKindChatTokens
+	generationCount := int64(0)
+	chargeUsage := r.metrics.BillingUsage
+	var charge int64
+	var err error
+	if r.metrics.isImageRoute() {
+		chargeKind = billing.ChargeKindImageGeneration
+		generationCount = int64(r.metrics.GenerationCount)
+		chargeUsage = billing.Usage{}
+		charge, err = billing.CalculateGenerationCharge(r.billing.price, generationCount)
+	} else {
+		if !r.metrics.UsageObserved {
+			return errors.New("successful provider response is missing verifiable usage")
+		}
+		charge, err = billing.CalculateCharge(r.billing.price, r.metrics.BillingUsage)
+	}
 	if err != nil {
 		return err
 	}
 	channelID, _ := finalChannel(attempts)
 	providerRef := fmt.Sprintf("channel-%d", channelID)
-	_, err = r.billing.client.Settle(detached, billing.SettlementRequest{
-		ReservationID:    r.billing.reservation.ReservationID,
-		ReceiptID:        r.metrics.ReceiptID,
+	_, err = r.billing.client.Charge(detached, billing.ChargeRequest{
+		AccountID:        r.billing.accountID,
+		APIKeyID:         r.metrics.APIKeyID,
+		BillingEventID:   r.billing.billingEventID,
+		ReceiptID:        r.billing.admission.ReceiptID,
 		ExternalModel:    r.billing.price.Model,
 		PricingVersion:   r.billing.price.Version,
-		Usage:            r.metrics.BillingUsage,
+		ChargeKind:       chargeKind,
+		Usage:            chargeUsage,
+		GenerationCount:  generationCount,
 		ChargeMicrounits: charge,
 		ProviderRef:      providerRef,
 	})
@@ -213,7 +227,7 @@ func (r *relayRun) run() {
 				}
 				r.metrics.Save(ctx, false, billingErr, r.iter.Attempts())
 				if !r.c.Writer.Written() {
-					resp.Error(r.c, http.StatusBadGateway, "billing settlement failed")
+					resp.Error(r.c, http.StatusBadGateway, "billing charge failed")
 				}
 				return
 			}

@@ -19,7 +19,8 @@ func userBillingPriceConfigured(price model.UserBillingPrice) bool {
 		price.InputMicrounitsPerMillion != 0 ||
 		price.OutputMicrounitsPerMillion != 0 ||
 		price.CacheReadMicrounitsPerMillion != 0 ||
-		price.CacheWriteMicrounitsPerMillion != 0
+		price.CacheWriteMicrounitsPerMillion != 0 ||
+		price.GenerationMicrounitsPerImage != 0
 }
 
 func validateUserBillingPrice(price model.UserBillingPrice) error {
@@ -35,15 +36,19 @@ func validateUserBillingPrice(price model.UserBillingPrice) error {
 		price.CacheReadMicrounitsPerMillion,
 		price.CacheWriteMicrounitsPerMillion,
 	}
-	nonzero := false
+	tokenPrice := false
 	for _, rate := range rates {
 		if rate < 0 {
 			return fmt.Errorf("user billing price cannot be negative")
 		}
-		nonzero = nonzero || rate > 0
+		tokenPrice = tokenPrice || rate > 0
 	}
-	if !nonzero {
-		return fmt.Errorf("user billing price must contain a nonzero rate")
+	if price.GenerationMicrounitsPerImage < 0 {
+		return fmt.Errorf("user billing generation price cannot be negative")
+	}
+	generationPrice := price.GenerationMicrounitsPerImage > 0
+	if tokenPrice == generationPrice {
+		return fmt.Errorf("user billing price must select exactly one token or generation mode")
 	}
 	return nil
 }

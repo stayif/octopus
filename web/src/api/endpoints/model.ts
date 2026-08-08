@@ -17,6 +17,12 @@ export interface LLMPrice {
  */
 export interface LLMInfo extends LLMPrice {
     name: string;
+    pricing_version?: string;
+    input_microunits_per_million?: number;
+    output_microunits_per_million?: number;
+    cache_read_microunits_per_million?: number;
+    cache_write_microunits_per_million?: number;
+    generation_microunits_per_image?: number;
 }
 
 /**

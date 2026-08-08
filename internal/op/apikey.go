@@ -22,7 +22,11 @@ func APIKeyCreate(key *model.APIKey, ctx context.Context) error {
 	apiKeyBindingLock.Lock()
 	defer apiKeyBindingLock.Unlock()
 	if key.BillingEnabled {
-		key.SupportedModels = strings.TrimSpace(key.SupportedModels)
+		models, err := normalizeSupportedModels(key.SupportedModels)
+		if err != nil {
+			return err
+		}
+		key.SupportedModels = models
 		key.MaxCost = 0
 	}
 	if err := validateAPIKeyBinding(*key, 0); err != nil {
@@ -36,6 +40,27 @@ func APIKeyCreate(key *model.APIKey, ctx context.Context) error {
 	return nil
 }
 
+func normalizeSupportedModels(value string) (string, error) {
+	models := strings.Split(value, ",")
+	normalized := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, candidate := range models {
+		name := strings.TrimSpace(candidate)
+		if name == "" {
+			return "", fmt.Errorf("billing API key must bind explicit public models")
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		normalized = append(normalized, name)
+	}
+	if len(normalized) == 0 {
+		return "", fmt.Errorf("billing API key must bind explicit public models")
+	}
+	return strings.Join(normalized, ","), nil
+}
+
 func APIKeyUpdate(key *model.APIKey, ctx context.Context) error {
 	apiKeyBindingLock.Lock()
 	defer apiKeyBindingLock.Unlock()
@@ -47,7 +72,11 @@ func APIKeyUpdate(key *model.APIKey, ctx context.Context) error {
 	key.OwnerRoleID = existing.OwnerRoleID
 	key.BillingEnabled = existing.BillingEnabled
 	if existing.BillingEnabled {
-		key.SupportedModels = existing.SupportedModels
+		models, err := normalizeSupportedModels(key.SupportedModels)
+		if err != nil {
+			return err
+		}
+		key.SupportedModels = models
 		key.MaxCost = 0
 	}
 	if err := validateAPIKeyBinding(*key, key.ID); err != nil {
@@ -123,11 +152,11 @@ func validateAPIKeyBinding(key model.APIKey, currentID int) error {
 	if !ownerIdentifier.MatchString(key.OwnerAccountID) || !ownerIdentifier.MatchString(key.OwnerRoleID) {
 		return fmt.Errorf("billing owner identity is invalid")
 	}
-	models := strings.Split(key.SupportedModels, ",")
-	if len(models) != 1 || strings.TrimSpace(models[0]) == "" {
-		return fmt.Errorf("billing API key must bind exactly one public model")
+	models, err := normalizeSupportedModels(key.SupportedModels)
+	if err != nil {
+		return err
 	}
-	key.SupportedModels = strings.TrimSpace(models[0])
+	key.SupportedModels = models
 	if key.MaxCost != 0 {
 		return fmt.Errorf("billing API key cannot use legacy max cost")
 	}

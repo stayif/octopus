@@ -41,11 +41,14 @@ func LLMPriceDeleteFromDBWithNoPrice(modelNames []string, ctx context.Context) e
 		if modelName == "" {
 			continue
 		}
-		modelPrice, err := op.LLMGet(modelName)
+		modelInfo, err := op.LLMInfoGet(modelName)
 		if err != nil {
 			return err
 		}
-		if modelPrice.Input != 0 || modelPrice.Output != 0 || modelPrice.CacheRead != 0 || modelPrice.CacheWrite != 0 {
+		if modelInfo.Input != 0 || modelInfo.Output != 0 || modelInfo.CacheRead != 0 || modelInfo.CacheWrite != 0 ||
+			modelInfo.PricingVersion != "" || modelInfo.InputMicrounitsPerMillion != 0 ||
+			modelInfo.OutputMicrounitsPerMillion != 0 || modelInfo.CacheReadMicrounitsPerMillion != 0 ||
+			modelInfo.CacheWriteMicrounitsPerMillion != 0 || modelInfo.GenerationMicrounitsPerImage != 0 {
 			continue
 		}
 		needDeleteModelNames = append(needDeleteModelNames, modelName)

@@ -169,7 +169,7 @@ All configuration options can be overridden via environment variables using the 
 | `OCTOPUS_DATABASE_PATH` | `database.path` |
 | `OCTOPUS_LOG_LEVEL` | `log.level` |
 | `OCTOPUS_BILLING_BASE_URL` | Honey account billing service base URL (required for billing-bound API keys) |
-| `OCTOPUS_BILLING_SERVICE_TOKEN` | Shared service credential for Honey balance reservation and settlement |
+| `OCTOPUS_BILLING_SERVICE_TOKEN` | Shared service credential for Honey admission and postcharge bookkeeping |
 | `OCTOPUS_BILLING_TIMEOUT_SECONDS` | Billing request timeout in seconds (default `10`, allowed `1-60`) |
 | `OCTOPUS_GITHUB_PAT` | For rate limiting when getting the latest version (optional) |
 | `OCTOPUS_RELAY_MAX_SSE_EVENT_SIZE` | Maximum SSE event size (optional) |
@@ -179,11 +179,22 @@ All configuration options can be overridden via environment variables using the 
 | `OCTOPUS_IMAGES_BODY_TMP_CLEANUP_HOURS` | Startup cleanup threshold for temporary files (optional, default 24) |
 
 Billing-bound API keys use `billing_enabled`, `owner_account_id`, and
-`owner_role_id`, and must bind exactly one public model through
-`supported_models`. Configure that model's independent user price with
-`pricing_version` plus the four `*_microunits_per_million` fields. Provider
-cost fields (`input`, `output`, `cache_read`, and `cache_write`) remain
-operations-only and never determine the bound account charge.
+`owner_role_id`, and bind one or more explicit public models through the
+comma-separated `supported_models` field; an empty wildcard is rejected. One
+Honey account keeps one key for both `honey-chat` and `honey-image-v1`.
+
+Configure chat's independent user price with `pricing_version` plus the four
+`*_microunits_per_million` fields. Configure image generation with
+`pricing_version` plus `generation_microunits_per_image`; token rates and image
+fixed price are mutually exclusive. Provider cost fields (`input`, `output`,
+`cache_read`, and `cache_write`) remain operations-only and never determine the
+bound account charge.
+
+The active billing path admits a request when Honey reports a positive balance,
+then posts one charge only after final provider success. It performs no reserve,
+release, or cancellation. Provider failures are free; failover shares the same
+`X-Honey-Billing-Event-ID`; replaying the event returns the same receipt without
+a second deduction. Image billing accepts exactly one generated image (`n=1`).
 
 ### Image relay-log audit gate
 

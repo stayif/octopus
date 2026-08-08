@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -22,6 +23,7 @@ type Price struct {
 	OutputMicrounitsPerMillion     int64
 	CacheReadMicrounitsPerMillion  int64
 	CacheWriteMicrounitsPerMillion int64
+	GenerationMicrounitsPerImage   int64
 }
 
 type Usage struct {
@@ -29,6 +31,78 @@ type Usage struct {
 	OutputTokens     int64
 	CacheReadTokens  int64
 	CacheWriteTokens int64
+}
+
+type ChargeKind string
+
+const (
+	ChargeKindChatTokens      ChargeKind = "CHAT_TOKENS"
+	ChargeKindImageGeneration ChargeKind = "IMAGE_GENERATION"
+)
+
+type AdmissionRequest struct {
+	AccountID      string `json:"accountId"`
+	APIKeyID       int    `json:"apiKeyId"`
+	BillingEventID string `json:"billingEventId"`
+}
+
+type Admission struct {
+	ReceiptID string `json:"receiptId"`
+	Status    string `json:"status"`
+}
+
+type ChargeRequest struct {
+	AccountID        string
+	APIKeyID         int
+	BillingEventID   string
+	ReceiptID        string
+	ExternalModel    string
+	PricingVersion   string
+	ChargeKind       ChargeKind
+	Usage            Usage
+	GenerationCount  int64
+	ChargeMicrounits int64
+	ProviderRef      string
+}
+
+func (request ChargeRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		AccountID        string     `json:"accountId"`
+		APIKeyID         int        `json:"apiKeyId"`
+		BillingEventID   string     `json:"billingEventId"`
+		ReceiptID        string     `json:"receiptId"`
+		ExternalModel    string     `json:"externalModel"`
+		PricingVersion   string     `json:"pricingVersion"`
+		ChargeKind       ChargeKind `json:"chargeKind"`
+		InputTokens      int64      `json:"inputTokens"`
+		OutputTokens     int64      `json:"outputTokens"`
+		CacheReadTokens  int64      `json:"cacheReadTokens"`
+		CacheWriteTokens int64      `json:"cacheWriteTokens"`
+		GenerationCount  int64      `json:"generationCount"`
+		ChargeMicrounits int64      `json:"chargeMicrounits"`
+		ProviderRef      string     `json:"providerRef"`
+	}{
+		AccountID:        request.AccountID,
+		APIKeyID:         request.APIKeyID,
+		BillingEventID:   request.BillingEventID,
+		ReceiptID:        request.ReceiptID,
+		ExternalModel:    request.ExternalModel,
+		PricingVersion:   request.PricingVersion,
+		ChargeKind:       request.ChargeKind,
+		InputTokens:      request.Usage.InputTokens,
+		OutputTokens:     request.Usage.OutputTokens,
+		CacheReadTokens:  request.Usage.CacheReadTokens,
+		CacheWriteTokens: request.Usage.CacheWriteTokens,
+		GenerationCount:  request.GenerationCount,
+		ChargeMicrounits: request.ChargeMicrounits,
+		ProviderRef:      request.ProviderRef,
+	})
+}
+
+type Charge struct {
+	ReceiptID              string `json:"receiptId"`
+	ChargeMicrounits       int64  `json:"chargeMicrounits"`
+	BalanceAfterMicrounits int64  `json:"balanceAfterMicrounits"`
 }
 
 type ReserveRequest struct {
@@ -87,9 +161,8 @@ type Settlement struct {
 }
 
 type Client interface {
-	Reserve(context.Context, ReserveRequest) (Reservation, error)
-	Settle(context.Context, SettlementRequest) (Settlement, error)
-	Cancel(context.Context, string) (Reservation, error)
+	Admit(context.Context, AdmissionRequest) (Admission, error)
+	Charge(context.Context, ChargeRequest) (Charge, error)
 }
 
 var (
@@ -109,9 +182,19 @@ func DefaultClient() Client {
 	return defaultClient
 }
 
-func validatePrice(price Price) error {
+func validatePriceIdentity(price Price) error {
 	if strings.TrimSpace(price.Model) == "" || strings.TrimSpace(price.Version) == "" {
 		return fmt.Errorf("billing model and pricing version are required")
+	}
+	return nil
+}
+
+func validateTokenPrice(price Price) error {
+	if err := validatePriceIdentity(price); err != nil {
+		return err
+	}
+	if price.GenerationMicrounitsPerImage != 0 {
+		return fmt.Errorf("generation price cannot be used for token billing")
 	}
 	rates := []int64{
 		price.InputMicrounitsPerMillion,
@@ -132,6 +215,20 @@ func validatePrice(price Price) error {
 	return nil
 }
 
+func validateGenerationPrice(price Price) error {
+	if err := validatePriceIdentity(price); err != nil {
+		return err
+	}
+	if price.GenerationMicrounitsPerImage <= 0 {
+		return fmt.Errorf("generation price must be positive")
+	}
+	if price.InputMicrounitsPerMillion != 0 || price.OutputMicrounitsPerMillion != 0 ||
+		price.CacheReadMicrounitsPerMillion != 0 || price.CacheWriteMicrounitsPerMillion != 0 {
+		return fmt.Errorf("generation price cannot contain token rates")
+	}
+	return nil
+}
+
 func addProduct(total *int64, count, rate int64) error {
 	if count < 0 || rate < 0 {
 		return fmt.Errorf("billing values cannot be negative")
@@ -148,7 +245,7 @@ func addProduct(total *int64, count, rate int64) error {
 }
 
 func CalculateCharge(price Price, usage Usage) (int64, error) {
-	if err := validatePrice(price); err != nil {
+	if err := validateTokenPrice(price); err != nil {
 		return 0, err
 	}
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CacheReadTokens < 0 || usage.CacheWriteTokens < 0 {
@@ -178,8 +275,18 @@ func CalculateCharge(price Price, usage Usage) (int64, error) {
 	return (numerator + priceDivisor - 1) / priceDivisor, nil
 }
 
+func CalculateGenerationCharge(price Price, generationCount int64) (int64, error) {
+	if err := validateGenerationPrice(price); err != nil {
+		return 0, err
+	}
+	if generationCount != 1 {
+		return 0, fmt.Errorf("first release requires exactly one generation")
+	}
+	return price.GenerationMicrounitsPerImage, nil
+}
+
 func MaximumCharge(price Price, requestBytes int, maxOutputTokens int64) (int64, error) {
-	if err := validatePrice(price); err != nil {
+	if err := validateTokenPrice(price); err != nil {
 		return 0, err
 	}
 	if requestBytes <= 0 || maxOutputTokens <= 0 {
@@ -207,6 +314,22 @@ type HTTPClient struct {
 	baseURL *url.URL
 	token   string
 	client  *http.Client
+}
+
+type HTTPStatusError struct {
+	StatusCode int
+}
+
+func (err *HTTPStatusError) Error() string {
+	return fmt.Sprintf("billing request returned HTTP %d", err.StatusCode)
+}
+
+func StatusCode(err error) (int, bool) {
+	var statusError *HTTPStatusError
+	if !errors.As(err, &statusError) {
+		return 0, false
+	}
+	return statusError.StatusCode, true
 }
 
 func NewHTTPClient(baseURL, serviceToken string, client *http.Client) (*HTTPClient, error) {
@@ -253,7 +376,7 @@ func (client *HTTPClient) post(ctx context.Context, path string, request any, re
 		if httpResponse.StatusCode < 200 || httpResponse.StatusCode >= 300 {
 			io.Copy(io.Discard, io.LimitReader(httpResponse.Body, 64*1024))
 			httpResponse.Body.Close()
-			lastErr = fmt.Errorf("billing request returned HTTP %d", httpResponse.StatusCode)
+			lastErr = &HTTPStatusError{StatusCode: httpResponse.StatusCode}
 			if httpResponse.StatusCode >= 500 {
 				continue
 			}
@@ -269,6 +392,28 @@ func (client *HTTPClient) post(ctx context.Context, path string, request any, re
 		lastErr = fmt.Errorf("decode billing response: %w", decodeErr)
 	}
 	return lastErr
+}
+
+func (client *HTTPClient) Admit(ctx context.Context, request AdmissionRequest) (Admission, error) {
+	var response Admission
+	if err := client.post(ctx, "/internal/v1/billing/admissions", request, &response); err != nil {
+		return Admission{}, err
+	}
+	if response.ReceiptID == "" || (response.Status != "ALLOWED" && response.Status != "REPLAYED") {
+		return Admission{}, fmt.Errorf("billing admission response is invalid")
+	}
+	return response, nil
+}
+
+func (client *HTTPClient) Charge(ctx context.Context, request ChargeRequest) (Charge, error) {
+	var response Charge
+	if err := client.post(ctx, "/internal/v1/billing/charges", request, &response); err != nil {
+		return Charge{}, err
+	}
+	if response.ReceiptID != request.ReceiptID || response.ChargeMicrounits != request.ChargeMicrounits || response.BalanceAfterMicrounits < 0 {
+		return Charge{}, fmt.Errorf("billing charge response is invalid")
+	}
+	return response, nil
 }
 
 func (client *HTTPClient) Reserve(ctx context.Context, request ReserveRequest) (Reservation, error) {
