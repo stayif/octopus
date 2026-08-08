@@ -12,7 +12,7 @@ import (
 	"github.com/bestruirui/octopus/internal/model"
 )
 
-func TestBillingAPIKeyHasOneImmutableOwnerEvenUnderConcurrentCreation(t *testing.T) {
+func TestBillingAPIKeyHasOneImmutableOwnerAndMutableExplicitModels(t *testing.T) {
 	apiKeyCache.Clear()
 	apiKeyIDMap.Clear()
 	if err := db.InitDB("sqlite", filepath.Join(t.TempDir(), "octopus.db"), false); err != nil {
@@ -68,7 +68,7 @@ func TestBillingAPIKeyHasOneImmutableOwnerEvenUnderConcurrentCreation(t *testing
 	if err != nil {
 		t.Fatalf("APIKeyGet: %v", err)
 	}
-	if updated.OwnerAccountID != "account-a" || updated.OwnerRoleID != "role-a" || updated.SupportedModels != "honey-chat" {
+	if updated.OwnerAccountID != "account-a" || updated.OwnerRoleID != "role-a" || updated.SupportedModels != "another-model" {
 		t.Fatalf("billing owner/model changed: %+v", updated)
 	}
 
@@ -79,6 +79,19 @@ func TestBillingAPIKeyHasOneImmutableOwnerEvenUnderConcurrentCreation(t *testing
 	}
 	if err := APIKeyCreate(&legacy, context.Background()); err != nil {
 		t.Fatalf("legacy API key must remain compatible: %v", err)
+	}
+}
+
+func TestBillingAPIKeyNormalizesMultipleExplicitModels(t *testing.T) {
+	models, err := normalizeSupportedModels(" honey-chat, honey-image-v1,honey-chat ")
+	if err != nil {
+		t.Fatalf("normalizeSupportedModels: %v", err)
+	}
+	if models != "honey-chat,honey-image-v1" {
+		t.Fatalf("models=%q", models)
+	}
+	if _, err := normalizeSupportedModels(""); err == nil {
+		t.Fatal("empty wildcard model binding must be rejected")
 	}
 }
 

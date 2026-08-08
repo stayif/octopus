@@ -13,6 +13,7 @@ type UserBillingPrice struct {
 	OutputMicrounitsPerMillion     int64  `json:"output_microunits_per_million,omitempty"`
 	CacheReadMicrounitsPerMillion  int64  `json:"cache_read_microunits_per_million,omitempty"`
 	CacheWriteMicrounitsPerMillion int64  `json:"cache_write_microunits_per_million,omitempty"`
+	GenerationMicrounitsPerImage   int64  `json:"generation_microunits_per_image,omitempty"`
 }
 
 type LLMInfo struct {

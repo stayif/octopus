@@ -10,9 +10,11 @@ import (
 )
 
 type billingState struct {
-	client      billing.Client
-	price       billing.Price
-	reservation billing.Reservation
+	client         billing.Client
+	price          billing.Price
+	admission      billing.Admission
+	accountID      string
+	billingEventID string
 }
 
 // relayRun 保存一次客户端请求在负载均衡循环中共享的状态。
