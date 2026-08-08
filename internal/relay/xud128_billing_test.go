@@ -33,6 +33,10 @@ func TestImageFailoverChargesOnceOnlyAfterFinalSuccess(t *testing.T) {
 			RouteType:       llm.RequestTypeImage,
 			RouteFormat:     llm.APIFormatOpenAIImageGeneration,
 			GenerationCount: 1,
+			BillingUsage: billing.Usage{
+				InputTokens:  95,
+				OutputTokens: 4_354,
+			},
 		},
 		billing: &billingState{
 			client:         client,
@@ -62,5 +66,8 @@ func TestImageFailoverChargesOnceOnlyAfterFinalSuccess(t *testing.T) {
 	charge := client.charges[0]
 	if charge.ChargeKind != billing.ChargeKindImageGeneration || charge.GenerationCount != 1 || charge.ChargeMicrounits != 250 || charge.ProviderRef != "channel-2" {
 		t.Fatalf("charge=%+v", charge)
+	}
+	if charge.Usage != (billing.Usage{}) {
+		t.Fatalf("image charge included provider token usage: %+v", charge.Usage)
 	}
 }

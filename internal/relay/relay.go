@@ -160,11 +160,13 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 	detached := context.WithoutCancel(ctx)
 	chargeKind := billing.ChargeKindChatTokens
 	generationCount := int64(0)
+	chargeUsage := r.metrics.BillingUsage
 	var charge int64
 	var err error
 	if r.metrics.isImageRoute() {
 		chargeKind = billing.ChargeKindImageGeneration
 		generationCount = int64(r.metrics.GenerationCount)
+		chargeUsage = billing.Usage{}
 		charge, err = billing.CalculateGenerationCharge(r.billing.price, generationCount)
 	} else {
 		if !r.metrics.UsageObserved {
@@ -185,7 +187,7 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 		ExternalModel:    r.billing.price.Model,
 		PricingVersion:   r.billing.price.Version,
 		ChargeKind:       chargeKind,
-		Usage:            r.metrics.BillingUsage,
+		Usage:            chargeUsage,
 		GenerationCount:  generationCount,
 		ChargeMicrounits: charge,
 		ProviderRef:      providerRef,
