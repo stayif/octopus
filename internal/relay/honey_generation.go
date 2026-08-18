@@ -143,7 +143,7 @@ func prepareHoneyGeneration(
 		resp.Error(c, http.StatusServiceUnavailable, "Honey generation state is unavailable")
 		return nil, errHoneyGenerationHandled
 	}
-	if !attemptMatchesHoneyBinding(attempt, binding) {
+	if !attemptMatchesHoneyBinding(attempt, binding, mode == honeyAttemptModeResolveOnly) {
 		writeHoneyGenerationConflict(c)
 		return nil, errHoneyGenerationHandled
 	}
@@ -179,7 +179,11 @@ func loadHoneyGenerationByBilling(ctx context.Context, billingEventID string) (d
 	return attempt, err
 }
 
-func attemptMatchesHoneyBinding(attempt dbmodel.HoneyGenerationAttempt, binding honeyGenerationBinding) bool {
+func attemptMatchesHoneyBinding(
+	attempt dbmodel.HoneyGenerationAttempt,
+	binding honeyGenerationBinding,
+	resolveOnly bool,
+) bool {
 	return attempt.GenerationID == binding.generationID &&
 		attempt.BillingEventID == binding.billingEventID &&
 		attempt.AccountID == binding.accountID &&
@@ -188,7 +192,7 @@ func attemptMatchesHoneyBinding(attempt dbmodel.HoneyGenerationAttempt, binding 
 		attempt.RouteFormat == binding.routeFormat &&
 		attempt.RequestModel == binding.requestModel &&
 		attempt.RequestDigest == binding.requestDigest &&
-		attempt.ProviderBodyDigest == binding.providerBodyDigest
+		(resolveOnly || attempt.ProviderBodyDigest == binding.providerBodyDigest)
 }
 
 func (execution *honeyGenerationExecution) claim(c *gin.Context) (bool, error) {

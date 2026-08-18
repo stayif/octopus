@@ -353,9 +353,37 @@ func TestXUD161DurableGenerationFaultWindows(t *testing.T) {
 				t.Fatalf("mode=%s replay body changed", mode)
 			}
 		}
+		// Runtime rebuilds dynamic Memory and Emotion prompt context before a
+		// RESOLVE_ONLY request. That can change the Provider body even though the
+		// stable Honey request identity is unchanged. Resolution never calls the
+		// Provider, so it must replay the durable result by stable identity while
+		// START continues to bind the exact Provider body below.
+		resolvePrompt := "concurrent with refreshed runtime context"
+		resolveBody := xud161Body(resolvePrompt, false)
+		resolved, resolvedBody, resolveErr := xud161Post(
+			context.Background(),
+			relayServer.Client(),
+			url,
+			honeyAttemptModeResolveOnly,
+			identity,
+			resolveBody,
+			"account-xud161-a",
+		)
+		if resolveErr != nil || resolved.StatusCode != http.StatusOK || resolved.Header.Get(honeyGenerationReplayed) != "true" {
+			t.Fatalf("changed-body resolve=%v err=%v body=%s", resolved, resolveErr, resolvedBody)
+		}
+		if !bytes.Equal(resolvedBody, first.body) {
+			t.Fatal("changed-body RESOLVE_ONLY did not replay the durable result")
+		}
 		admissions, charges := billingClient.counts(identity.billingEventID)
-		if provider.callCount("concurrent") != 1 || admissions != 1 || charges != 1 {
-			t.Fatalf("provider=%d admissions=%d charges=%d", provider.callCount("concurrent"), admissions, charges)
+		if provider.callCount("concurrent") != 1 || provider.callCount(resolvePrompt) != 0 || admissions != 1 || charges != 1 {
+			t.Fatalf(
+				"provider=%d resolve_provider=%d admissions=%d charges=%d",
+				provider.callCount("concurrent"),
+				provider.callCount(resolvePrompt),
+				admissions,
+				charges,
+			)
 		}
 	})
 
