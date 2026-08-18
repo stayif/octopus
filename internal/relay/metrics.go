@@ -27,6 +27,7 @@ type RelayMetrics struct {
 	ProfileVersion  string
 	GenerationCount int
 	ResultCode      int
+	HoneyGeneration bool
 
 	// 首 Token 时间
 	FirstTokenTime time.Time
@@ -235,6 +236,12 @@ func (m *RelayMetrics) buildRelayLog(err error, duration time.Duration, attempts
 		relayLog.InputTokens = int(m.Stats.InputToken)
 		relayLog.OutputTokens = int(m.Stats.OutputToken)
 		relayLog.Cost = m.Stats.InputCost + m.Stats.OutputCost
+	}
+	// A Honey durable generation stores only execution/usage metadata here. The
+	// necessary replay result lives in its dedicated attempt row, while Runtime
+	// remains the sole authority for user and assistant chat history.
+	if m.HoneyGeneration {
+		return relayLog
 	}
 
 	relayLog.RequestContent = m.requestContent()

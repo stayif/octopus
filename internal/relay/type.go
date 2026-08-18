@@ -26,6 +26,7 @@ type relayRun struct {
 	iter            *balancer.Iterator
 	group           dbmodel.Group
 	billing         *billingState
+	generation      *honeyGenerationExecution
 }
 
 // relayAttempt 保存一次上游通道尝试的状态。

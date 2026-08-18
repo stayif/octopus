@@ -68,6 +68,7 @@ func InitDB(dbType, dsn string, debug bool) error {
 		&model.StatsChannel{},
 		&model.StatsAPIKey{},
 		&model.RelayLog{},
+		&model.HoneyGenerationAttempt{},
 		&migrate.MigrationRecord{},
 	); err != nil {
 		return err
@@ -75,11 +76,29 @@ func InitDB(dbType, dsn string, debug bool) error {
 	if err := migrate.AfterAutoMigrate(db); err != nil {
 		return err
 	}
+	if err := RecoverHoneyGenerationAttempts(); err != nil {
+		return err
+	}
 	// Postgres: schema changes during migrations can invalidate cached prepared plans
 	// (e.g. "cached plan must not change result type"). Clear them.
 	if db.Dialector != nil && db.Dialector.Name() == "postgres" {
 		db.Exec("DEALLOCATE ALL")
 		db.Exec("DISCARD ALL")
+	}
+	return nil
+}
+
+// RecoverHoneyGenerationAttempts fails closed after a process restart. A
+// durable RUNNING row means the Provider may already have executed, so it can
+// never return to ACCEPTED or be automatically retried.
+func RecoverHoneyGenerationAttempts() error {
+	if err := db.Model(&model.HoneyGenerationAttempt{}).
+		Where("status = ?", model.HoneyGenerationRunning).
+		Updates(map[string]any{
+			"status":     model.HoneyGenerationAmbiguous,
+			"updated_at": time.Now().UTC(),
+		}).Error; err != nil {
+		return fmt.Errorf("recover Honey generation attempts: %w", err)
 	}
 	return nil
 }
