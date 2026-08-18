@@ -52,6 +52,10 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 		resp.Error(c, http.StatusBadRequest, err.Error())
 		return nil, err
 	}
+	generation, err := prepareHoneyGeneration(c, inboundType, internalRequest)
+	if err != nil {
+		return nil, err
+	}
 
 	if supportedModels := c.GetString("supported_models"); supportedModels != "" {
 		if !slices.Contains(strings.Split(supportedModels, ","), internalRequest.Model) {
@@ -84,7 +88,9 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 		metrics:         newRelayMetrics(apiKeyID, internalRequest, inboundType, time.Now()),
 		iter:            iter,
 		group:           group,
+		generation:      generation,
 	}
+	run.metrics.HoneyGeneration = generation != nil
 	run.metrics.RequestID = requestID
 	if c.GetBool("billing_enabled") {
 		if err := run.admitBilling(); err != nil {
@@ -117,6 +123,11 @@ func (r *relayRun) admitBilling() error {
 	}
 	client := billing.DefaultClient()
 	if client == nil {
+		if r.generation != nil {
+			err := errors.New("billing admission is unavailable")
+			resp.Error(r.c, http.StatusServiceUnavailable, err.Error())
+			return err
+		}
 		log.Warnf("billing admission unavailable for event %s; continuing fail-open", billingEventID)
 		return nil
 	}
@@ -131,10 +142,19 @@ func (r *relayRun) admitBilling() error {
 			resp.Error(r.c, status, "billing admission rejected")
 			return err
 		}
+		if r.generation != nil {
+			resp.Error(r.c, http.StatusServiceUnavailable, "billing admission failed")
+			return err
+		}
 		log.Warnf("billing admission failed for event %s; continuing fail-open: %v", billingEventID, err)
 		return nil
 	}
 	if admission.ReceiptID == "" || (admission.Status != "ALLOWED" && admission.Status != "REPLAYED") {
+		if r.generation != nil {
+			err := errors.New("billing admission was invalid")
+			resp.Error(r.c, http.StatusBadGateway, err.Error())
+			return err
+		}
 		log.Warnf("billing admission was invalid for event %s; continuing fail-open", billingEventID)
 		return nil
 	}
@@ -147,6 +167,12 @@ func (r *relayRun) admitBilling() error {
 	}
 	r.metrics.ReceiptID = admission.ReceiptID
 	r.c.Header("X-Octopus-Receipt-ID", r.metrics.ReceiptID)
+	if r.generation != nil {
+		if err := r.generation.saveReceipt(r.c, admission.ReceiptID); err != nil {
+			resp.Error(r.c, http.StatusServiceUnavailable, "billing receipt could not be persisted")
+			return err
+		}
+	}
 	return nil
 }
 
@@ -196,6 +222,10 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 }
 
 func (r *relayRun) run() {
+	if r.generation != nil {
+		r.runHoneyGeneration()
+		return
+	}
 	ctx := r.c.Request.Context()
 	var lastErr error
 
@@ -250,6 +280,99 @@ func (r *relayRun) run() {
 	r.metrics.ResultCode = http.StatusBadGateway
 	r.metrics.Save(ctx, false, lastErr, r.iter.Attempts())
 	resp.Error(r.c, http.StatusBadGateway, lastErr.Error())
+}
+
+// runHoneyGeneration executes at most one upstream request. Provider output is
+// buffered, charged, and durably committed before any byte is returned to
+// Runtime, so a lost response can be replayed without another Provider call.
+func (r *relayRun) runHoneyGeneration() {
+	ctx := r.c.Request.Context()
+	var attempt *relayAttempt
+	var lastErr error
+	for r.iter.Next() {
+		candidate, err := r.prepareAttempt()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if candidate != nil {
+			attempt = candidate
+			break
+		}
+	}
+	if attempt == nil {
+		if lastErr == nil {
+			lastErr = errors.New("no available channel")
+		}
+		r.metrics.ResultCode = http.StatusServiceUnavailable
+		r.metrics.Save(ctx, false, lastErr, r.iter.Attempts())
+		resp.Error(r.c, http.StatusServiceUnavailable, "no available channel")
+		return
+	}
+
+	claimed, err := r.generation.claim(r.c)
+	if err != nil {
+		r.metrics.ResultCode = http.StatusServiceUnavailable
+		r.metrics.Save(ctx, false, err, r.iter.Attempts())
+		resp.Error(r.c, http.StatusServiceUnavailable, "Honey generation state is unavailable")
+		return
+	}
+	if !claimed {
+		return
+	}
+
+	// Client disconnects cannot cancel a Provider call after the durable RUNNING
+	// transition; its result must either become COMPLETED or remain AMBIGUOUS.
+	r.c.Request = r.c.Request.WithContext(context.WithoutCancel(ctx))
+	originalWriter := r.c.Writer
+	capture := newHoneyGenerationCaptureWriter(originalWriter)
+	r.c.Writer = capture
+	_, providerErr := attempt.run()
+	r.c.Writer = originalWriter
+
+	if providerErr != nil {
+		stateErr := r.generation.markAmbiguous(r.c)
+		r.metrics.ResultCode = http.StatusBadGateway
+		r.metrics.Save(ctx, false, errors.Join(providerErr, stateErr), r.iter.Attempts())
+		resetHoneyGenerationResponseHeaders(r.c)
+		writeHoneyGenerationState(r.c, dbmodel.HoneyGenerationAmbiguous)
+		return
+	}
+
+	if billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), true); billingErr != nil {
+		stateErr := r.generation.markAmbiguous(r.c)
+		r.metrics.ResultCode = http.StatusBadGateway
+		r.metrics.Save(ctx, false, errors.Join(billingErr, stateErr), r.iter.Attempts())
+		resetHoneyGenerationResponseHeaders(r.c)
+		writeHoneyGenerationState(r.c, dbmodel.HoneyGenerationAmbiguous)
+		return
+	}
+	if capture.overflow {
+		overflowErr := errors.New("Honey generation result exceeded the durable replay limit")
+		stateErr := r.generation.markAmbiguous(r.c)
+		r.metrics.ResultCode = http.StatusBadGateway
+		r.metrics.Save(ctx, false, errors.Join(overflowErr, stateErr), r.iter.Attempts())
+		resetHoneyGenerationResponseHeaders(r.c)
+		writeHoneyGenerationState(r.c, dbmodel.HoneyGenerationAmbiguous)
+		return
+	}
+
+	completed, completeErr := r.generation.complete(
+		r.c,
+		capture.Status(),
+		capture.Header().Get("Content-Type"),
+		capture.Body(),
+	)
+	if completeErr != nil {
+		stateErr := r.generation.markAmbiguous(r.c)
+		r.metrics.ResultCode = http.StatusBadGateway
+		r.metrics.Save(ctx, false, errors.Join(completeErr, stateErr), r.iter.Attempts())
+		resetHoneyGenerationResponseHeaders(r.c)
+		writeHoneyGenerationState(r.c, dbmodel.HoneyGenerationAmbiguous)
+		return
+	}
+	r.metrics.Save(ctx, true, nil, r.iter.Attempts())
+	writeHoneyGenerationResult(r.c, completed, false)
 }
 
 func (r *relayRun) prepareAttempt() (*relayAttempt, error) {
@@ -428,6 +551,16 @@ func (ra *relayAttempt) forward() (int, error) {
 }
 
 func (ra *relayAttempt) applyChannelRequestOptions(outboundRequest *httpclient.Request) error {
+	// These headers are an internal Runtime-to-Octopus execution contract. They
+	// bind the durable attempt locally and must not escape to an upstream LLM.
+	for _, header := range []string{
+		honeyAttemptModeHeader,
+		honeyBillingIDHeader,
+		honeyGenerationIDHeader,
+		honeyRequestDigestHeader,
+	} {
+		outboundRequest.Headers.Del(header)
+	}
 	// ParamOverride 只覆盖 JSON 请求体；multipart 图片编辑等请求不能按 map 合并。
 	if ra.channel.ParamOverride != nil && *ra.channel.ParamOverride != "" && strings.Contains(strings.ToLower(outboundRequest.Headers.Get("Content-Type")+" "+outboundRequest.ContentType), "application/json") {
 		var bodyMap map[string]any
