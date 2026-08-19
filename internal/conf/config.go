@@ -24,9 +24,14 @@ type Database struct {
 }
 
 type Billing struct {
-	BaseURL        string `mapstructure:"base_url"`
-	ServiceToken   string `mapstructure:"service_token"`
-	TimeoutSeconds int    `mapstructure:"timeout_seconds"`
+	BaseURL                    string `mapstructure:"base_url"`
+	ServiceToken               string `mapstructure:"service_token"`
+	ServiceTokenFile           string `mapstructure:"service_token_file"`
+	TimeoutSeconds             int    `mapstructure:"timeout_seconds"`
+	PendingMaxAmountMicrounits int64  `mapstructure:"pending_max_amount_microunits"`
+	PendingMaxCount            int64  `mapstructure:"pending_max_count"`
+	PendingMaxAgeSeconds       int64  `mapstructure:"pending_max_age_seconds"`
+	SettlementPollMillis       int64  `mapstructure:"settlement_poll_millis"`
 }
 
 type Config struct {
@@ -83,5 +88,10 @@ func setDefaults() {
 	viper.SetDefault("log.level", "info")
 	viper.SetDefault("billing.base_url", "")
 	viper.SetDefault("billing.service_token", "")
+	viper.SetDefault("billing.service_token_file", "")
 	viper.SetDefault("billing.timeout_seconds", 10)
+	viper.SetDefault("billing.pending_max_amount_microunits", 10_000_000)
+	viper.SetDefault("billing.pending_max_count", 100)
+	viper.SetDefault("billing.pending_max_age_seconds", 3600)
+	viper.SetDefault("billing.settlement_poll_millis", 250)
 }

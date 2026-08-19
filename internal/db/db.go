@@ -69,6 +69,7 @@ func InitDB(dbType, dsn string, debug bool) error {
 		&model.StatsAPIKey{},
 		&model.RelayLog{},
 		&model.HoneyGenerationAttempt{},
+		&model.HoneyChargeOutbox{},
 		&migrate.MigrationRecord{},
 	); err != nil {
 		return err
@@ -107,7 +108,7 @@ func RecoverHoneyGenerationAttempts() error {
 func initSQLite(path string, config *gorm.Config) (*gorm.DB, error) {
 	params := url.Values{}
 	params.Add("_pragma", "journal_mode(WAL)")
-	params.Add("_pragma", "synchronous(NORMAL)")
+	params.Add("_pragma", "synchronous(FULL)")
 	params.Add("_pragma", "cache_size(10000)")
 	params.Add("_pragma", "busy_timeout(5000)")
 	params.Add("_pragma", "foreign_keys(ON)")
