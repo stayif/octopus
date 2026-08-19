@@ -65,6 +65,19 @@ func Start() error {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	r := newHTTPHandler()
+
+	httpSrv.Addr = fmt.Sprintf("%s:%d", conf.AppConfig.Server.Host, conf.AppConfig.Server.Port)
+	httpSrv.Handler = r
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Errorf("http server listen and serve error: %v", err)
+		}
+	}()
+	return nil
+}
+
+func newHTTPHandler() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
 		resp.Error(c, http.StatusInternalServerError, resp.ErrInternalServer)
@@ -76,18 +89,13 @@ func Start() error {
 	}
 	r.Use(middleware.Cors())
 	r.Use(middleware.StaticEmbed("/", static.StaticFS))
+	r.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 
 	registerRelayRoutes(r)
 	router.RegisterAll(r)
-
-	httpSrv.Addr = fmt.Sprintf("%s:%d", conf.AppConfig.Server.Host, conf.AppConfig.Server.Port)
-	httpSrv.Handler = r
-	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Errorf("http server listen and serve error: %v", err)
-		}
-	}()
-	return nil
+	return r
 }
 
 func billingServiceToken(config conf.Billing) (string, error) {
