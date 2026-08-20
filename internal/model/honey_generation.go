@@ -5,10 +5,11 @@ import "time"
 type HoneyGenerationStatus string
 
 const (
-	HoneyGenerationAccepted  HoneyGenerationStatus = "ACCEPTED"
-	HoneyGenerationRunning   HoneyGenerationStatus = "RUNNING"
-	HoneyGenerationCompleted HoneyGenerationStatus = "COMPLETED"
-	HoneyGenerationAmbiguous HoneyGenerationStatus = "AMBIGUOUS"
+	HoneyGenerationAccepted      HoneyGenerationStatus = "ACCEPTED"
+	HoneyGenerationRunning       HoneyGenerationStatus = "RUNNING"
+	HoneyGenerationPendingCharge HoneyGenerationStatus = "PENDING_CHARGE"
+	HoneyGenerationCompleted     HoneyGenerationStatus = "COMPLETED"
+	HoneyGenerationAmbiguous     HoneyGenerationStatus = "AMBIGUOUS"
 )
 
 // HoneyGenerationAttempt is the durable execution record for one Honey main-chat

@@ -18,6 +18,7 @@ import (
 	"github.com/bestruirui/octopus/internal/op"
 	"github.com/bestruirui/octopus/internal/relay/balancer"
 	"github.com/bestruirui/octopus/internal/server/resp"
+	"github.com/bestruirui/octopus/internal/settlement"
 	"github.com/bestruirui/octopus/internal/utils/log"
 	"github.com/bestruirui/octopus/internal/utils/snowflake"
 	"github.com/gin-gonic/gin"
@@ -55,6 +56,28 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 	generation, err := prepareHoneyGeneration(c, inboundType, internalRequest)
 	if err != nil {
 		return nil, err
+	}
+	if generation != nil {
+		service := settlement.DefaultService()
+		if service == nil {
+			err := errors.New("Honey settlement service is unavailable")
+			resp.Error(c, http.StatusServiceUnavailable, err.Error())
+			return nil, err
+		}
+		if err := service.CheckProviderGate(
+			context.WithoutCancel(c.Request.Context()),
+			generation.attempt.AccountID,
+			time.Now().UTC(),
+		); err != nil {
+			if status, reason, ok := settlement.HTTPStatusForGate(err); ok {
+				c.Header("X-Honey-Settlement-Gate", string(reason))
+				c.Header("Retry-After", "1")
+				resp.Error(c, status, "new paid Provider calls are paused by pending charge limits")
+				return nil, err
+			}
+			resp.Error(c, http.StatusServiceUnavailable, "Honey settlement gate is unavailable")
+			return nil, err
+		}
 	}
 
 	if supportedModels := c.GetString("supported_models"); supportedModels != "" {
@@ -183,7 +206,18 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 	if !success {
 		return nil
 	}
-	detached := context.WithoutCancel(ctx)
+	request, err := r.buildChargeRequest(attempts)
+	if err != nil {
+		return err
+	}
+	_, err = r.billing.client.Charge(context.WithoutCancel(ctx), request)
+	return err
+}
+
+func (r *relayRun) buildChargeRequest(attempts []dbmodel.ChannelAttempt) (billing.ChargeRequest, error) {
+	if r.billing == nil {
+		return billing.ChargeRequest{}, errors.New("billing state is unavailable")
+	}
 	chargeKind := billing.ChargeKindChatTokens
 	generationCount := int64(0)
 	chargeUsage := r.metrics.BillingUsage
@@ -196,16 +230,16 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 		charge, err = billing.CalculateGenerationCharge(r.billing.price, generationCount)
 	} else {
 		if !r.metrics.UsageObserved {
-			return errors.New("successful provider response is missing verifiable usage")
+			return billing.ChargeRequest{}, errors.New("successful provider response is missing verifiable usage")
 		}
 		charge, err = billing.CalculateCharge(r.billing.price, r.metrics.BillingUsage)
 	}
 	if err != nil {
-		return err
+		return billing.ChargeRequest{}, err
 	}
 	channelID, _ := finalChannel(attempts)
 	providerRef := fmt.Sprintf("channel-%d", channelID)
-	_, err = r.billing.client.Charge(detached, billing.ChargeRequest{
+	return billing.ChargeRequest{
 		AccountID:        r.billing.accountID,
 		APIKeyID:         r.metrics.APIKeyID,
 		BillingEventID:   r.billing.billingEventID,
@@ -217,8 +251,7 @@ func (r *relayRun) finalizeBilling(ctx context.Context, attempts []dbmodel.Chann
 		GenerationCount:  generationCount,
 		ChargeMicrounits: charge,
 		ProviderRef:      providerRef,
-	})
-	return err
+	}, nil
 }
 
 func (r *relayRun) run() {
@@ -282,9 +315,9 @@ func (r *relayRun) run() {
 	resp.Error(r.c, http.StatusBadGateway, lastErr.Error())
 }
 
-// runHoneyGeneration executes at most one upstream request. Provider output is
-// buffered, charged, and durably committed before any byte is returned to
-// Runtime, so a lost response can be replayed without another Provider call.
+// runHoneyGeneration executes at most one upstream request. Provider output and
+// its stable pending-charge outbox are committed together before any byte is
+// returned to Runtime. Core acknowledgement is deliberately asynchronous.
 func (r *relayRun) runHoneyGeneration() {
 	ctx := r.c.Request.Context()
 	var attempt *relayAttempt
@@ -339,14 +372,6 @@ func (r *relayRun) runHoneyGeneration() {
 		return
 	}
 
-	if billingErr := r.finalizeBilling(ctx, r.iter.Attempts(), true); billingErr != nil {
-		stateErr := r.generation.markAmbiguous(r.c)
-		r.metrics.ResultCode = http.StatusBadGateway
-		r.metrics.Save(ctx, false, errors.Join(billingErr, stateErr), r.iter.Attempts())
-		resetHoneyGenerationResponseHeaders(r.c)
-		writeHoneyGenerationState(r.c, dbmodel.HoneyGenerationAmbiguous)
-		return
-	}
 	if capture.overflow {
 		overflowErr := errors.New("Honey generation result exceeded the durable replay limit")
 		stateErr := r.generation.markAmbiguous(r.c)
@@ -357,11 +382,22 @@ func (r *relayRun) runHoneyGeneration() {
 		return
 	}
 
-	completed, completeErr := r.generation.complete(
+	chargeRequest, billingErr := r.buildChargeRequest(r.iter.Attempts())
+	if billingErr != nil {
+		stateErr := r.generation.markAmbiguous(r.c)
+		r.metrics.ResultCode = http.StatusBadGateway
+		r.metrics.Save(ctx, false, errors.Join(billingErr, stateErr), r.iter.Attempts())
+		resetHoneyGenerationResponseHeaders(r.c)
+		writeHoneyGenerationState(r.c, dbmodel.HoneyGenerationAmbiguous)
+		return
+	}
+
+	pending, completeErr := r.generation.persistProviderResultAndCharge(
 		r.c,
 		capture.Status(),
 		capture.Header().Get("Content-Type"),
 		capture.Body(),
+		chargeRequest,
 	)
 	if completeErr != nil {
 		stateErr := r.generation.markAmbiguous(r.c)
@@ -371,8 +407,9 @@ func (r *relayRun) runHoneyGeneration() {
 		writeHoneyGenerationState(r.c, dbmodel.HoneyGenerationAmbiguous)
 		return
 	}
+	settlement.DefaultService().Wake()
 	r.metrics.Save(ctx, true, nil, r.iter.Attempts())
-	writeHoneyGenerationResult(r.c, completed, false)
+	writeHoneyGenerationResult(r.c, pending, false)
 }
 
 func (r *relayRun) prepareAttempt() (*relayAttempt, error) {

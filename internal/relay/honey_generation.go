@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bestruirui/octopus/internal/billing"
 	"github.com/bestruirui/octopus/internal/db"
 	dbmodel "github.com/bestruirui/octopus/internal/model"
 	"github.com/bestruirui/octopus/internal/server/resp"
@@ -158,7 +159,7 @@ func prepareHoneyGeneration(
 	case dbmodel.HoneyGenerationRunning, dbmodel.HoneyGenerationAmbiguous:
 		writeHoneyGenerationState(c, attempt.Status)
 		return nil, errHoneyGenerationHandled
-	case dbmodel.HoneyGenerationCompleted:
+	case dbmodel.HoneyGenerationPendingCharge, dbmodel.HoneyGenerationCompleted:
 		writeHoneyGenerationResult(c, attempt, true)
 		return nil, errHoneyGenerationHandled
 	default:
@@ -221,7 +222,7 @@ func (execution *honeyGenerationExecution) claim(c *gin.Context) (bool, error) {
 		return false, err
 	}
 	switch attempt.Status {
-	case dbmodel.HoneyGenerationCompleted:
+	case dbmodel.HoneyGenerationPendingCharge, dbmodel.HoneyGenerationCompleted:
 		writeHoneyGenerationResult(c, attempt, true)
 	case dbmodel.HoneyGenerationAccepted, dbmodel.HoneyGenerationRunning, dbmodel.HoneyGenerationAmbiguous:
 		writeHoneyGenerationState(c, attempt.Status)
@@ -256,14 +257,27 @@ func (execution *honeyGenerationExecution) saveReceipt(c *gin.Context, receiptID
 	return nil
 }
 
-func (execution *honeyGenerationExecution) complete(
+func (execution *honeyGenerationExecution) persistProviderResultAndCharge(
 	c *gin.Context,
 	status int,
 	contentType string,
 	body []byte,
+	charge billing.ChargeRequest,
 ) (dbmodel.HoneyGenerationAttempt, error) {
 	if execution == nil || len(body) > honeyGenerationResultLimit {
 		return dbmodel.HoneyGenerationAttempt{}, fmt.Errorf("Honey generation result is not persistable")
+	}
+	if charge.BillingEventID != execution.attempt.BillingEventID ||
+		charge.AccountID != execution.attempt.AccountID ||
+		charge.APIKeyID != execution.attempt.APIKeyID ||
+		charge.ReceiptID == "" || charge.ReceiptID != execution.attempt.ReceiptID ||
+		charge.ExternalModel != execution.attempt.RequestModel ||
+		charge.PricingVersion == "" || charge.ProviderRef == "" ||
+		charge.ChargeMicrounits < 0 {
+		return dbmodel.HoneyGenerationAttempt{}, fmt.Errorf("Honey pending charge binding is invalid")
+	}
+	if charge.ChargeKind != billing.ChargeKindChatTokens && charge.ChargeKind != billing.ChargeKindImageGeneration {
+		return dbmodel.HoneyGenerationAttempt{}, fmt.Errorf("Honey pending charge kind is invalid")
 	}
 	if status < 100 || status > 599 {
 		status = http.StatusOK
@@ -273,21 +287,57 @@ func (execution *honeyGenerationExecution) complete(
 	}
 	ctx := context.WithoutCancel(c.Request.Context())
 	now := time.Now().UTC()
-	result := db.GetDB().WithContext(ctx).Model(&dbmodel.HoneyGenerationAttempt{}).
-		Where("generation_id = ? AND status = ?", execution.attempt.GenerationID, dbmodel.HoneyGenerationRunning).
-		Updates(map[string]any{
-			"status":                dbmodel.HoneyGenerationCompleted,
-			"response_status":       status,
-			"response_content_type": contentType,
-			"response_body":         append([]byte(nil), body...),
-			"completed_at":          now,
-			"updated_at":            now,
-		})
-	if result.Error != nil {
-		return dbmodel.HoneyGenerationAttempt{}, result.Error
-	}
-	if result.RowsAffected != 1 {
-		return dbmodel.HoneyGenerationAttempt{}, fmt.Errorf("Honey generation completion transition was not applied")
+	err := db.GetDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&dbmodel.HoneyGenerationAttempt{}).
+			Where("generation_id = ? AND billing_event_id = ? AND account_id = ? AND role_id = ? AND status = ?",
+				execution.attempt.GenerationID,
+				execution.attempt.BillingEventID,
+				execution.attempt.AccountID,
+				execution.attempt.RoleID,
+				dbmodel.HoneyGenerationRunning,
+			).
+			Updates(map[string]any{
+				"status":                dbmodel.HoneyGenerationPendingCharge,
+				"response_status":       status,
+				"response_content_type": contentType,
+				"response_body":         append([]byte(nil), body...),
+				"completed_at":          now,
+				"updated_at":            now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("Honey generation durable-result transition was not applied")
+		}
+		outbox := dbmodel.HoneyChargeOutbox{
+			GenerationID:     execution.attempt.GenerationID,
+			BillingEventID:   charge.BillingEventID,
+			AccountID:        execution.attempt.AccountID,
+			RoleID:           execution.attempt.RoleID,
+			APIKeyID:         charge.APIKeyID,
+			ReceiptID:        charge.ReceiptID,
+			ExternalModel:    charge.ExternalModel,
+			PricingVersion:   charge.PricingVersion,
+			ChargeKind:       string(charge.ChargeKind),
+			InputTokens:      charge.Usage.InputTokens,
+			OutputTokens:     charge.Usage.OutputTokens,
+			CacheReadTokens:  charge.Usage.CacheReadTokens,
+			CacheWriteTokens: charge.Usage.CacheWriteTokens,
+			GenerationCount:  charge.GenerationCount,
+			ChargeMicrounits: charge.ChargeMicrounits,
+			ProviderRef:      charge.ProviderRef,
+			Status:           dbmodel.HoneyChargePending,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if err := tx.Create(&outbox).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return dbmodel.HoneyGenerationAttempt{}, err
 	}
 	attempt, err := loadHoneyGeneration(ctx, execution.attempt.GenerationID)
 	if err != nil {
@@ -328,7 +378,7 @@ func writeHoneyGenerationResult(c *gin.Context, attempt dbmodel.HoneyGenerationA
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	c.Header(honeyGenerationState, string(dbmodel.HoneyGenerationCompleted))
+	c.Header(honeyGenerationState, string(attempt.Status))
 	if replayed {
 		c.Header(honeyGenerationReplayed, "true")
 	} else {
