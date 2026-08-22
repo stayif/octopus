@@ -119,8 +119,21 @@ func newRelayRun(c *gin.Context, inboundType llm.APIFormat, inAdapter transforme
 		if err := run.admitBilling(); err != nil {
 			return nil, err
 		}
+	} else if run.metrics.isImageRoute() {
+		err := errors.New("image generation requires a billing-bound API key")
+		resp.Error(c, http.StatusUnauthorized, err.Error())
+		return nil, err
 	}
 	return run, nil
+}
+
+func (r *relayRun) requiresBillingReceipt() bool {
+	return r != nil && (r.generation != nil || (r.metrics != nil && r.metrics.isImageRoute()))
+}
+
+func isRelayOwnedResponseHeader(key string) bool {
+	return strings.EqualFold(key, "X-Octopus-Request-ID") ||
+		strings.EqualFold(key, "X-Octopus-Receipt-ID")
 }
 
 func (r *relayRun) admitBilling() error {
@@ -146,7 +159,7 @@ func (r *relayRun) admitBilling() error {
 	}
 	client := billing.DefaultClient()
 	if client == nil {
-		if r.generation != nil {
+		if r.requiresBillingReceipt() {
 			err := errors.New("billing admission is unavailable")
 			resp.Error(r.c, http.StatusServiceUnavailable, err.Error())
 			return err
@@ -165,7 +178,7 @@ func (r *relayRun) admitBilling() error {
 			resp.Error(r.c, status, "billing admission rejected")
 			return err
 		}
-		if r.generation != nil {
+		if r.requiresBillingReceipt() {
 			resp.Error(r.c, http.StatusServiceUnavailable, "billing admission failed")
 			return err
 		}
@@ -173,7 +186,7 @@ func (r *relayRun) admitBilling() error {
 		return nil
 	}
 	if admission.ReceiptID == "" || (admission.Status != "ALLOWED" && admission.Status != "REPLAYED") {
-		if r.generation != nil {
+		if r.requiresBillingReceipt() {
 			err := errors.New("billing admission was invalid")
 			resp.Error(r.c, http.StatusBadGateway, err.Error())
 			return err
@@ -575,6 +588,9 @@ func (ra *relayAttempt) forward() (int, error) {
 	contentType := "application/json"
 	if result.Response.Headers != nil {
 		for key, values := range result.Response.Headers {
+			if isRelayOwnedResponseHeader(key) {
+				continue
+			}
 			for _, value := range values {
 				ra.c.Header(key, value)
 			}
