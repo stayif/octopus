@@ -3,7 +3,7 @@ FROM debian:bookworm
 ARG TARGETPLATFORM
 ENV TZ=Asia/Shanghai
 
-RUN apt-get update && apt-get install -y ca-certificates tzdata gosu && \
+RUN apt-get update && apt-get install -y ca-certificates tzdata gosu wget && \
     ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     dpkg-reconfigure -f noninteractive tzdata && \
     rm -rf /var/cache/apt/*  && \
